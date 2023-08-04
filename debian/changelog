@@ -1,0 +1,5 @@
+docker-compose (2.20.2-1kaisen) kaisen-packages; urgency=medium
+
+  * Initial release
+
+ -- Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>  Fri, 04 Aug 2023 11:49:29 +0200

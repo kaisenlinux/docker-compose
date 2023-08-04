@@ -1,0 +1,13 @@
+Author: Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>
+
+--- docker-compose-2.20.2.orig/Makefile
++++ docker-compose-2.20.2/Makefile
+@@ -13,7 +13,7 @@
+ #   limitations under the License.
+ 
+ PKG := github.com/docker/compose/v2
+-VERSION ?= $(shell git describe --match 'v[0-9]*' --dirty='.m' --always --tags)
++VERSION ?= 2.20.2
+ 
+ GO_LDFLAGS ?= -w -X ${PKG}/internal.Version=${VERSION}
+ GO_BUILDTAGS ?= e2e
