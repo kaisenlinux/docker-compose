@@ -1,4 +1,5 @@
 usr
+usr/bin
 usr/libexec
 usr/libexec/docker
 usr/libexec/docker/cli-plugins

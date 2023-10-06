@@ -17,15 +17,16 @@
 package e2e
 
 import (
+	"crypto/rand"
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
-	"github.com/distribution/distribution/v3/uuid"
 	"github.com/stretchr/testify/require"
 	"gotest.tools/v3/assert"
 	"gotest.tools/v3/assert/cmp"
@@ -34,21 +35,28 @@ import (
 )
 
 func TestWatch(t *testing.T) {
-	if runtime.GOOS == "darwin" {
-		t.Skip("Test currently broken on macOS due to symlink issues (see compose-go#436)")
-	}
-
 	services := []string{"alpine", "busybox", "debian"}
-	for _, svcName := range services {
-		t.Run(svcName, func(t *testing.T) {
-			t.Helper()
-			doTest(t, svcName)
-		})
-	}
+	t.Run("docker cp", func(t *testing.T) {
+		for _, svcName := range services {
+			t.Run(svcName, func(t *testing.T) {
+				t.Helper()
+				doTest(t, svcName, false)
+			})
+		}
+	})
+
+	t.Run("tar", func(t *testing.T) {
+		for _, svcName := range services {
+			t.Run(svcName, func(t *testing.T) {
+				t.Helper()
+				doTest(t, svcName, true)
+			})
+		}
+	})
 }
 
 // NOTE: these tests all share a single Compose file but are safe to run concurrently
-func doTest(t *testing.T, svcName string) {
+func doTest(t *testing.T, svcName string, tarSync bool) {
 	tmpdir := t.TempDir()
 	dataDir := filepath.Join(tmpdir, "data")
 	writeDataFile := func(name string, contents string) {
@@ -63,22 +71,25 @@ func doTest(t *testing.T, svcName string) {
 	CopyFile(t, filepath.Join("fixtures", "watch", "compose.yaml"), composeFilePath)
 
 	projName := "e2e-watch-" + svcName
+	if tarSync {
+		projName += "-tar"
+	}
 	env := []string{
 		"COMPOSE_FILE=" + composeFilePath,
 		"COMPOSE_PROJECT_NAME=" + projName,
+		"COMPOSE_EXPERIMENTAL_WATCH_TAR=" + strconv.FormatBool(tarSync),
 	}
 
 	cli := NewCLI(t, WithEnv(env...))
 
+	// important that --rmi is used to prune the images and ensure that watch builds on launch
 	cleanup := func() {
-		cli.RunDockerComposeCmd(t, "down", svcName, "--timeout=0", "--remove-orphans", "--volumes")
+		cli.RunDockerComposeCmd(t, "down", svcName, "--remove-orphans", "--volumes", "--rmi=local")
 	}
 	cleanup()
 	t.Cleanup(cleanup)
 
-	cli.RunDockerComposeCmd(t, "up", svcName, "--wait", "--build")
-
-	cmd := cli.NewDockerComposeCmd(t, "--verbose", "alpha", "watch", svcName)
+	cmd := cli.NewDockerComposeCmd(t, "--verbose", "watch", svcName)
 	// stream output since watch runs in the background
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -87,13 +98,14 @@ func doTest(t *testing.T, svcName string) {
 	t.Cleanup(func() {
 		// IMPORTANT: watch doesn't exit on its own, don't leak processes!
 		if r.Cmd.Process != nil {
+			t.Logf("Killing watch process: pid[%d]", r.Cmd.Process.Pid)
 			_ = r.Cmd.Process.Kill()
 		}
 	})
 	var testComplete atomic.Bool
 	go func() {
 		// if the process exits abnormally before the test is done, fail the test
-		if err := r.Cmd.Wait(); err != nil && !testComplete.Load() {
+		if err := r.Cmd.Wait(); err != nil && !t.Failed() && !testComplete.Load() {
 			assert.Check(t, cmp.Nil(err))
 		}
 	}()
@@ -114,7 +126,9 @@ func doTest(t *testing.T, svcName string) {
 	}
 
 	waitForFlush := func() {
-		sentinelVal := uuid.Generate().String()
+		b := make([]byte, 32)
+		_, _ = rand.Read(b)
+		sentinelVal := fmt.Sprintf("%x", b)
 		writeDataFile("wait.txt", sentinelVal)
 		poll.WaitOn(t, checkFileContents("/app/data/wait.txt", sentinelVal))
 	}
@@ -123,7 +137,7 @@ func doTest(t *testing.T, svcName string) {
 	poll.WaitOn(t, func(t poll.LogT) poll.Result {
 		writeDataFile("hello.txt", "hello world")
 		return checkFileContents("/app/data/hello.txt", "hello world")(t)
-	})
+	}, poll.WithDelay(time.Second))
 
 	t.Logf("Modifying file contents")
 	writeDataFile("hello.txt", "hello watch")
@@ -136,8 +150,7 @@ func doTest(t *testing.T, svcName string) {
 		Assert(t, icmd.Expected{
 			ExitCode: 1,
 			Err:      "No such file or directory",
-		},
-		)
+		})
 
 	t.Logf("Writing to ignored paths")
 	writeDataFile("data.foo", "ignored")
@@ -147,14 +160,12 @@ func doTest(t *testing.T, svcName string) {
 		Assert(t, icmd.Expected{
 			ExitCode: 1,
 			Err:      "No such file or directory",
-		},
-		)
+		})
 	cli.RunDockerComposeCmdNoCheck(t, "exec", svcName, "stat", "/app/data/ignored").
 		Assert(t, icmd.Expected{
 			ExitCode: 1,
 			Err:      "No such file or directory",
-		},
-		)
+		})
 
 	t.Logf("Creating subdirectory")
 	require.NoError(t, os.Mkdir(filepath.Join(dataDir, "subdir"), 0o700))
@@ -182,8 +193,7 @@ func doTest(t *testing.T, svcName string) {
 		Assert(t, icmd.Expected{
 			ExitCode: 1,
 			Err:      "No such file or directory",
-		},
-		)
+		})
 
 	testComplete.Store(true)
 }

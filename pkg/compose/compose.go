@@ -18,7 +18,6 @@ package compose
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -26,23 +25,23 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/jonboulle/clockwork"
+
 	"github.com/docker/docker/api/types/volume"
 
 	"github.com/compose-spec/compose-go/types"
-	"github.com/distribution/distribution/v3/reference"
+	"github.com/distribution/reference"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/config/configfile"
 	"github.com/docker/cli/cli/flags"
 	"github.com/docker/cli/cli/streams"
+	"github.com/docker/compose/v2/pkg/api"
 	moby "github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/swarm"
 	"github.com/docker/docker/client"
 	"github.com/opencontainers/go-digest"
 	"github.com/pkg/errors"
-	"gopkg.in/yaml.v2"
-
-	"github.com/docker/compose/v2/pkg/api"
 )
 
 var stdioToStdout bool
@@ -58,6 +57,7 @@ func init() {
 func NewComposeService(dockerCli command.Cli) api.Service {
 	return &composeService{
 		dockerCli:      dockerCli,
+		clock:          clockwork.NewRealClock(),
 		maxConcurrency: -1,
 		dryRun:         false,
 	}
@@ -65,6 +65,7 @@ func NewComposeService(dockerCli command.Cli) api.Service {
 
 type composeService struct {
 	dockerCli      command.Cli
+	clock          clockwork.Clock
 	maxConcurrency int
 	dryRun         bool
 }
@@ -165,9 +166,9 @@ func (s *composeService) Config(ctx context.Context, project *types.Project, opt
 
 	switch options.Format {
 	case "json":
-		return json.MarshalIndent(project, "", "  ")
+		return project.MarshalJSON()
 	case "yaml":
-		return yaml.Marshal(project)
+		return project.MarshalYAML()
 	default:
 		return nil, fmt.Errorf("unsupported format %q", options.Format)
 	}
