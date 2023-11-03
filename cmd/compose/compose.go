@@ -18,6 +18,7 @@ package compose
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -37,7 +38,6 @@ import (
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/compose/v2/pkg/remote"
 	"github.com/morikuni/aec"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -60,6 +60,8 @@ const (
 	ComposeRemoveOrphans = "COMPOSE_REMOVE_ORPHANS"
 	// ComposeIgnoreOrphans ignore "orphaned" containers
 	ComposeIgnoreOrphans = "COMPOSE_IGNORE_ORPHANS"
+	// ComposeEnvFiles defines the env files to use if --env-file isn't used
+	ComposeEnvFiles = "COMPOSE_ENV_FILES"
 )
 
 // Command defines a compose CLI command as a func with args
@@ -252,29 +254,17 @@ func (o *ProjectOptions) ToProject(dockerCli command.Cli, services []string, po 
 }
 
 func (o *ProjectOptions) configureRemoteLoaders(dockerCli command.Cli, po []cli.ProjectOptionsFn) ([]cli.ProjectOptionsFn, error) {
-	enabled, err := remote.GitRemoteLoaderEnabled()
+	git, err := remote.NewGitRemoteLoader(o.Offline)
 	if err != nil {
 		return nil, err
-	}
-	if enabled {
-		git, err := remote.NewGitRemoteLoader(o.Offline)
-		if err != nil {
-			return nil, err
-		}
-		po = append(po, cli.WithResourceLoader(git))
 	}
 
-	enabled, err = remote.OCIRemoteLoaderEnabled()
+	oci, err := remote.NewOCIRemoteLoader(dockerCli, o.Offline)
 	if err != nil {
 		return nil, err
 	}
-	if enabled {
-		git, err := remote.NewOCIRemoteLoader(dockerCli, o.Offline)
-		if err != nil {
-			return nil, err
-		}
-		po = append(po, cli.WithResourceLoader(git))
-	}
+
+	po = append(po, cli.WithResourceLoader(git), cli.WithResourceLoader(oci))
 	return po, nil
 }
 
@@ -517,6 +507,11 @@ func RootCommand(dockerCli command.Cli, backend api.Service) *cobra.Command { //
 }
 
 func setEnvWithDotEnv(prjOpts *ProjectOptions) error {
+	if len(prjOpts.EnvFiles) == 0 {
+		if envFiles := os.Getenv(ComposeEnvFiles); envFiles != "" {
+			prjOpts.EnvFiles = strings.Split(envFiles, ",")
+		}
+	}
 	options, err := prjOpts.toProjectOptions()
 	if err != nil {
 		return compose.WrapComposeError(err)

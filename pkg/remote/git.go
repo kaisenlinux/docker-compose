@@ -26,20 +26,20 @@ import (
 	"strconv"
 
 	"github.com/adrg/xdg"
-
 	"github.com/compose-spec/compose-go/cli"
 	"github.com/compose-spec/compose-go/loader"
 	"github.com/compose-spec/compose-go/types"
 	"github.com/docker/compose/v2/pkg/api"
 	"github.com/moby/buildkit/util/gitutil"
-	"github.com/pkg/errors"
 )
 
-func GitRemoteLoaderEnabled() (bool, error) {
-	if v := os.Getenv("COMPOSE_EXPERIMENTAL_GIT_REMOTE"); v != "" {
+const GIT_REMOTE_ENABLED = "COMPOSE_EXPERIMENTAL_GIT_REMOTE"
+
+func gitRemoteLoaderEnabled() (bool, error) {
+	if v := os.Getenv(GIT_REMOTE_ENABLED); v != "" {
 		enabled, err := strconv.ParseBool(v)
 		if err != nil {
-			return false, errors.Wrap(err, "COMPOSE_EXPERIMENTAL_GIT_REMOTE environment variable expects boolean value")
+			return false, fmt.Errorf("COMPOSE_EXPERIMENTAL_GIT_REMOTE environment variable expects boolean value: %w", err)
 		}
 		return enabled, err
 	}
@@ -75,6 +75,14 @@ func (g gitRemoteLoader) Accept(path string) bool {
 var commitSHA = regexp.MustCompile(`^[a-f0-9]{40}$`)
 
 func (g gitRemoteLoader) Load(ctx context.Context, path string) (string, error) {
+	enabled, err := gitRemoteLoaderEnabled()
+	if err != nil {
+		return "", err
+	}
+	if !enabled {
+		return "", fmt.Errorf("experimental git remote resource is disabled. %q must be set", GIT_REMOTE_ENABLED)
+	}
+
 	ref, err := gitutil.ParseGitRef(path)
 	if err != nil {
 		return "", err
@@ -90,7 +98,7 @@ func (g gitRemoteLoader) Load(ctx context.Context, path string) (string, error) 
 		out, err := cmd.Output()
 		if err != nil {
 			if cmd.ProcessState.ExitCode() == 2 {
-				return "", errors.Wrapf(err, "repository does not contain ref %s, output: %q", path, string(out))
+				return "", fmt.Errorf("repository does not contain ref %s, output: %q: %w", path, string(out), err)
 			}
 			return "", err
 		}

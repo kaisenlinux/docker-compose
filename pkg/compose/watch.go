@@ -16,6 +16,7 @@ package compose
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -33,7 +34,6 @@ import (
 	moby "github.com/docker/docker/api/types"
 	"github.com/jonboulle/clockwork"
 	"github.com/mitchellh/mapstructure"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 )
@@ -149,7 +149,7 @@ func (s *composeService) Watch(ctx context.Context, project *types.Project, serv
 	}
 
 	if !watching {
-		return fmt.Errorf("none of the selected services is configured for watch, consider setting an 'x-develop' section")
+		return fmt.Errorf("none of the selected services is configured for watch, consider setting an 'develop' section")
 	}
 
 	return eg.Wait()
@@ -415,6 +415,7 @@ func (t tarDockerClient) Exec(ctx context.Context, containerID string, cmd []str
 
 func (s *composeService) handleWatchBatch(ctx context.Context, project *types.Project, serviceName string, build api.BuildOptions, batch []fileEvent, syncer sync.Syncer) error {
 	pathMappings := make([]sync.PathMapping, len(batch))
+	restartService := false
 	for i := range batch {
 		if batch[i].Action == types.WatchActionRebuild {
 			fmt.Fprintf(
@@ -441,6 +442,9 @@ func (s *composeService) handleWatchBatch(ctx context.Context, project *types.Pr
 			}
 			return nil
 		}
+		if batch[i].Action == types.WatchActionSyncRestart {
+			restartService = true
+		}
 		pathMappings[i] = batch[i].PathMapping
 	}
 
@@ -452,6 +456,13 @@ func (s *composeService) handleWatchBatch(ctx context.Context, project *types.Pr
 	}
 	if err := syncer.Sync(ctx, service, pathMappings); err != nil {
 		return err
+	}
+	if restartService {
+		return s.Restart(ctx, project.Name, api.RestartOptions{
+			Services: []string{serviceName},
+			Project:  project,
+			NoDeps:   false,
+		})
 	}
 	return nil
 }

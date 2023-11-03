@@ -1,3 +1,10 @@
+docker-compose (2.23.0-1kaisen) kaisen-packages; urgency=medium
+
+  * Import the new upstream release
+  * Update the quilt patch
+
+ -- Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>  Sun, 29 Oct 2023 19:22:12 +0100
+
 docker-compose (2.22.0-1kaisen) kaisen-packages; urgency=medium
 
   * Import the new upstream release

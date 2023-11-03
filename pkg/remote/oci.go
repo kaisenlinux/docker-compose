@@ -26,21 +26,21 @@ import (
 	"strings"
 
 	"github.com/adrg/xdg"
+	"github.com/compose-spec/compose-go/loader"
 	"github.com/distribution/reference"
 	"github.com/docker/buildx/store/storeutil"
 	"github.com/docker/buildx/util/imagetools"
 	"github.com/docker/cli/cli/command"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
-
-	"github.com/compose-spec/compose-go/loader"
-	"github.com/pkg/errors"
 )
 
-func OCIRemoteLoaderEnabled() (bool, error) {
-	if v := os.Getenv("COMPOSE_EXPERIMENTAL_OCI_REMOTE"); v != "" {
+const OCI_REMOTE_ENABLED = "COMPOSE_EXPERIMENTAL_OCI_REMOTE"
+
+func ociRemoteLoaderEnabled() (bool, error) {
+	if v := os.Getenv(OCI_REMOTE_ENABLED); v != "" {
 		enabled, err := strconv.ParseBool(v)
 		if err != nil {
-			return false, errors.Wrap(err, "COMPOSE_EXPERIMENTAL_OCI_REMOTE environment variable expects boolean value")
+			return false, fmt.Errorf("COMPOSE_EXPERIMENTAL_OCI_REMOTE environment variable expects boolean value: %w", err)
 		}
 		return enabled, err
 	}
@@ -77,6 +77,14 @@ func (g ociRemoteLoader) Accept(path string) bool {
 }
 
 func (g ociRemoteLoader) Load(ctx context.Context, path string) (string, error) {
+	enabled, err := ociRemoteLoaderEnabled()
+	if err != nil {
+		return "", err
+	}
+	if !enabled {
+		return "", fmt.Errorf("experimental OCI remote resource is disabled. %q must be set", OCI_REMOTE_ENABLED)
+	}
+
 	if g.offline {
 		return "", nil
 	}
@@ -100,50 +108,57 @@ func (g ociRemoteLoader) Load(ctx context.Context, path string) (string, error) 
 	local := filepath.Join(g.cache, descriptor.Digest.Hex())
 	composeFile := filepath.Join(local, "compose.yaml")
 	if _, err = os.Stat(local); os.IsNotExist(err) {
-
-		err = os.MkdirAll(local, 0o700)
+		var manifest v1.Manifest
+		err = json.Unmarshal(content, &manifest)
 		if err != nil {
 			return "", err
 		}
 
-		f, err := os.Create(composeFile)
-		if err != nil {
-			return "", err
-		}
-		defer f.Close() //nolint:errcheck
-
-		var descriptor v1.Manifest
-		err = json.Unmarshal(content, &descriptor)
-		if err != nil {
-			return "", err
-		}
-
-		if descriptor.Config.MediaType != "application/vnd.docker.compose.project" {
-			return "", fmt.Errorf("%s is not a compose project OCI artifact, but %s", ref.String(), descriptor.Config.MediaType)
-		}
-
-		for i, layer := range descriptor.Layers {
-			digested, err := reference.WithDigest(ref, layer.Digest)
-			if err != nil {
-				return "", err
-			}
-			content, _, err := resolver.Get(ctx, digested.String())
-			if err != nil {
-				return "", err
-			}
-			if i > 0 {
-				_, err = f.Write([]byte("\n---\n"))
-				if err != nil {
-					return "", err
-				}
-			}
-			_, err = f.Write(content)
-			if err != nil {
-				return "", err
-			}
+		err2 := g.pullComposeFiles(ctx, local, composeFile, manifest, ref, resolver)
+		if err2 != nil {
+			return "", err2
 		}
 	}
 	return composeFile, nil
+}
+
+func (g ociRemoteLoader) pullComposeFiles(ctx context.Context, local string, composeFile string, manifest v1.Manifest, ref reference.Named, resolver *imagetools.Resolver) error {
+	err := os.MkdirAll(local, 0o700)
+	if err != nil {
+		return err
+	}
+
+	f, err := os.Create(composeFile)
+	if err != nil {
+		return err
+	}
+	defer f.Close() //nolint:errcheck
+
+	if manifest.ArtifactType != "application/vnd.docker.compose.project" {
+		return fmt.Errorf("%s is not a compose project OCI artifact, but %s", ref.String(), manifest.ArtifactType)
+	}
+
+	for i, layer := range manifest.Layers {
+		digested, err := reference.WithDigest(ref, layer.Digest)
+		if err != nil {
+			return err
+		}
+		content, _, err := resolver.Get(ctx, digested.String())
+		if err != nil {
+			return err
+		}
+		if i > 0 {
+			_, err = f.Write([]byte("\n---\n"))
+			if err != nil {
+				return err
+			}
+		}
+		_, err = f.Write(content)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 var _ loader.ResourceLoader = ociRemoteLoader{}
