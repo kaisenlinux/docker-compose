@@ -24,8 +24,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/compose-spec/compose-go/cli"
-	"github.com/compose-spec/compose-go/types"
+	"github.com/compose-spec/compose-go/v2/cli"
+	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/docker/cli/cli/command"
 	"github.com/spf13/cobra"
 
@@ -159,10 +159,11 @@ func runServices(ctx context.Context, dockerCli command.Cli, opts configOptions)
 	if err != nil {
 		return err
 	}
-	return project.WithServices(project.ServiceNames(), func(s types.ServiceConfig) error {
-		fmt.Fprintln(dockerCli.Out(), s.Name)
+	err = project.ForEachService(project.ServiceNames(), func(serviceName string, _ *types.ServiceConfig) error {
+		fmt.Fprintln(dockerCli.Out(), serviceName)
 		return nil
 	})
+	return err
 }
 
 func runVolumes(ctx context.Context, dockerCli command.Cli, opts configOptions) error {
@@ -190,6 +191,10 @@ func runHash(ctx context.Context, dockerCli command.Cli, opts configOptions) err
 		return err
 	}
 
+	if len(services) == 0 {
+		services = project.ServiceNames()
+	}
+
 	sorted := services
 	sort.Slice(sorted, func(i, j int) bool {
 		return sorted[i] < sorted[j]
@@ -206,7 +211,7 @@ func runHash(ctx context.Context, dockerCli command.Cli, opts configOptions) err
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(dockerCli.Out(), "%s %s\n", s.Name, hash)
+		fmt.Fprintf(dockerCli.Out(), "%s %s\n", name, hash)
 	}
 	return nil
 }

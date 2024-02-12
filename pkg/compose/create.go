@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -34,13 +35,14 @@ import (
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/strslice"
+	"github.com/docker/docker/api/types/versions"
 	volume_api "github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/go-connections/nat"
 	"github.com/docker/go-units"
 	"github.com/sirupsen/logrus"
 
-	"github.com/compose-spec/compose-go/types"
+	"github.com/compose-spec/compose-go/v2/types"
 
 	"github.com/docker/compose/v2/pkg/api"
 	"github.com/docker/compose/v2/pkg/progress"
@@ -93,16 +95,11 @@ func (s *composeService) create(ctx context.Context, project *types.Project, opt
 		return err
 	}
 
-	allServices := project.AllServices()
-	allServiceNames := []string{}
-	for _, service := range allServices {
-		allServiceNames = append(allServiceNames, service.Name)
-	}
+	allServiceNames := append(project.ServiceNames(), project.DisabledServiceNames()...)
 	orphans := observedState.filter(isNotService(allServiceNames...))
 	if len(orphans) > 0 && !options.IgnoreOrphans {
 		if options.RemoveOrphans {
-			w := progress.ContextWriter(ctx)
-			err := s.removeContainers(ctx, w, orphans, nil, false)
+			err := s.removeContainers(ctx, orphans, nil, false)
 			if err != nil {
 				return err
 			}
@@ -181,7 +178,23 @@ func (s *composeService) getCreateConfigs(ctx context.Context,
 	proxyConfig := types.MappingWithEquals(s.configFile().ParseProxyConfig(s.apiClient().DaemonHost(), nil))
 	env := proxyConfig.OverrideBy(service.Environment)
 
-	containerConfig := container.Config{
+	var mainNwName string
+	var mainNw *types.ServiceNetworkConfig
+	if len(service.Networks) > 0 {
+		mainNwName = service.NetworksByPriority()[0]
+		mainNw = service.Networks[mainNwName]
+	}
+
+	macAddress, err := s.prepareContainerMACAddress(ctx, service, mainNw, mainNwName)
+	if err != nil {
+		return createConfigs{}, err
+	}
+
+	healthcheck, err := s.ToMobyHealthCheck(ctx, service.HealthCheck)
+	if err != nil {
+		return createConfigs{}, err
+	}
+	var containerConfig = container.Config{
 		Hostname:        service.Hostname,
 		Domainname:      service.DomainName,
 		User:            service.User,
@@ -197,15 +210,13 @@ func (s *composeService) getCreateConfigs(ctx context.Context,
 		WorkingDir:      service.WorkingDir,
 		Entrypoint:      entrypoint,
 		NetworkDisabled: service.NetworkMode == "disabled",
-		MacAddress:      service.MacAddress,
+		MacAddress:      macAddress,
 		Labels:          labels,
 		StopSignal:      service.StopSignal,
 		Env:             ToMobyEnv(env),
-		Healthcheck:     ToMobyHealthCheck(service.HealthCheck),
+		Healthcheck:     healthcheck,
 		StopTimeout:     ToSeconds(service.StopGracePeriod),
-	}
-
-	// VOLUMES/MOUNTS/FILESYSTEMS
+	} // VOLUMES/MOUNTS/FILESYSTEMS
 	tmpfs := map[string]string{}
 	for _, t := range service.Tmpfs {
 		if arr := strings.SplitN(t, ":", 2); len(arr) > 1 {
@@ -262,8 +273,9 @@ func (s *composeService) getCreateConfigs(ctx context.Context,
 		DNS:            service.DNS,
 		DNSSearch:      service.DNSSearch,
 		DNSOptions:     service.DNSOpts,
-		ExtraHosts:     service.ExtraHosts.AsList(),
+		ExtraHosts:     service.ExtraHosts.AsList(":"),
 		SecurityOpt:    securityOpts,
+		StorageOpt:     service.StorageOpt,
 		UsernsMode:     container.UsernsMode(service.UserNSMode),
 		UTSMode:        container.UTSMode(service.Uts),
 		Privileged:     service.Privileged,
@@ -291,6 +303,58 @@ func (s *composeService) getCreateConfigs(ctx context.Context,
 	return cfgs, nil
 }
 
+// prepareContainerMACAddress handles the service-level mac_address field and the newer mac_address field added to service
+// network config. This newer field is only compatible with the Engine API v1.44 (and onwards), and this API version
+// also deprecates the container-wide mac_address field. Thus, this method will validate service config and mutate the
+// passed mainNw to provide backward-compatibility whenever possible.
+//
+// It returns the container-wide MAC address, but this value will be kept empty for newer API versions.
+func (s *composeService) prepareContainerMACAddress(ctx context.Context, service types.ServiceConfig, mainNw *types.ServiceNetworkConfig, nwName string) (string, error) {
+	version, err := s.RuntimeVersion(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	// Engine API 1.44 added support for endpoint-specific MAC address and now returns a warning when a MAC address is
+	// set in container.Config. Thus, we have to jump through a number of hoops:
+	//
+	// 1. Top-level mac_address and main endpoint's MAC address should be the same ;
+	// 2. If supported by the API, top-level mac_address should be migrated to the main endpoint and container.Config
+	//    should be kept empty ;
+	// 3. Otherwise, the endpoint mac_address should be set in container.Config and no other endpoint-specific
+	//    mac_address can be specified. If that's the case, use top-level mac_address ;
+	//
+	// After that, if an endpoint mac_address is set, it's either user-defined or migrated by the code below, so
+	// there's no need to check for API version in defaultNetworkSettings.
+	macAddress := service.MacAddress
+	if macAddress != "" && mainNw != nil && mainNw.MacAddress != "" && mainNw.MacAddress != macAddress {
+		return "", fmt.Errorf("the service-level mac_address should have the same value as network %s", nwName)
+	}
+	if versions.GreaterThanOrEqualTo(version, "1.44") {
+		if mainNw != nil && mainNw.MacAddress == "" {
+			mainNw.MacAddress = macAddress
+		}
+		macAddress = ""
+	} else if len(service.Networks) > 0 {
+		var withMacAddress []string
+		for nwName, nw := range service.Networks {
+			if nw != nil && nw.MacAddress != "" {
+				withMacAddress = append(withMacAddress, nwName)
+			}
+		}
+
+		if len(withMacAddress) > 1 {
+			return "", fmt.Errorf("a MAC address is specified for multiple networks (%s), but this feature requires Docker Engine 1.44 or later (currently: %s)", strings.Join(withMacAddress, ", "), version)
+		}
+
+		if mainNw != nil {
+			macAddress = mainNw.MacAddress
+		}
+	}
+
+	return macAddress, nil
+}
+
 func getAliases(project *types.Project, service types.ServiceConfig, serviceIndex int, networkKey string, useNetworkAliases bool) []string {
 	aliases := []string{getContainerName(project.Name, service, serviceIndex)}
 	if useNetworkAliases {
@@ -308,6 +372,7 @@ func createEndpointSettings(p *types.Project, service types.ServiceConfig, servi
 	var (
 		ipv4Address string
 		ipv6Address string
+		macAddress  string
 	)
 	if config != nil {
 		ipv4Address = config.Ipv4Address
@@ -317,6 +382,7 @@ func createEndpointSettings(p *types.Project, service types.ServiceConfig, servi
 			IPv6Address:  ipv6Address,
 			LinkLocalIPs: config.LinkLocalIPs,
 		}
+		macAddress = config.MacAddress
 	}
 	return &network.EndpointSettings{
 		Aliases:     getAliases(p, service, serviceIndex, networkKey, useNetworkAliases),
@@ -324,6 +390,7 @@ func createEndpointSettings(p *types.Project, service types.ServiceConfig, servi
 		IPAddress:   ipv4Address,
 		IPv6Gateway: ipv6Address,
 		IPAMConfig:  ipam,
+		MacAddress:  macAddress,
 	}
 }
 
@@ -426,7 +493,7 @@ func getRestartPolicy(service types.ServiceConfig) container.RestartPolicy {
 			attempts, _ = strconv.Atoi(split[1])
 		}
 		restart = container.RestartPolicy{
-			Name:              split[0],
+			Name:              mapRestartPolicyCondition(split[0]),
 			MaximumRetryCount: attempts,
 		}
 	}
@@ -444,17 +511,19 @@ func getRestartPolicy(service types.ServiceConfig) container.RestartPolicy {
 	return restart
 }
 
-func mapRestartPolicyCondition(condition string) string {
+func mapRestartPolicyCondition(condition string) container.RestartPolicyMode {
 	// map definitions of deploy.restart_policy to engine definitions
 	switch condition {
 	case "none", "no":
-		return "no"
-	case "on-failure", "unless-stopped":
-		return condition
+		return container.RestartPolicyDisabled
+	case "on-failure":
+		return container.RestartPolicyOnFailure
+	case "unless-stopped":
+		return container.RestartPolicyUnlessStopped
 	case "any", "always":
-		return "always"
+		return container.RestartPolicyAlways
 	default:
-		return condition
+		return container.RestartPolicyMode(condition)
 	}
 }
 
@@ -520,7 +589,14 @@ func getDeployResources(s types.ServiceConfig) container.Resources {
 		})
 	}
 
-	for name, u := range s.Ulimits {
+	ulimits := toUlimits(s.Ulimits)
+	resources.Ulimits = ulimits
+	return resources
+}
+
+func toUlimits(m map[string]*types.UlimitsConfig) []*units.Ulimit {
+	var ulimits []*units.Ulimit
+	for name, u := range m {
 		soft := u.Single
 		if u.Soft != 0 {
 			soft = u.Soft
@@ -529,13 +605,13 @@ func getDeployResources(s types.ServiceConfig) container.Resources {
 		if u.Hard != 0 {
 			hard = u.Hard
 		}
-		resources.Ulimits = append(resources.Ulimits, &units.Ulimit{
+		ulimits = append(ulimits, &units.Ulimit{
 			Name: name,
 			Hard: int64(hard),
 			Soft: int64(soft),
 		})
 	}
-	return resources
+	return ulimits
 }
 
 func setReservations(reservations *types.Resource, resources *container.Resources) {
@@ -800,8 +876,19 @@ func buildContainerConfigMounts(p types.Project, s types.ServiceConfig) ([]mount
 		}
 
 		definedConfig := p.Configs[config.Source]
-		if definedConfig.External.External {
+		if definedConfig.External {
 			return nil, fmt.Errorf("unsupported external config %s", definedConfig.Name)
+		}
+
+		if definedConfig.Driver != "" {
+			return nil, errors.New("Docker Compose does not support configs.*.driver")
+		}
+		if definedConfig.TemplateDriver != "" {
+			return nil, errors.New("Docker Compose does not support configs.*.template_driver")
+		}
+
+		if definedConfig.Environment != "" || definedConfig.Content != "" {
+			continue
 		}
 
 		bindMount, err := buildMount(p, types.ServiceVolumeConfig{
@@ -839,8 +926,15 @@ func buildContainerSecretMounts(p types.Project, s types.ServiceConfig) ([]mount
 		}
 
 		definedSecret := p.Secrets[secret.Source]
-		if definedSecret.External.External {
+		if definedSecret.External {
 			return nil, fmt.Errorf("unsupported external secret %s", definedSecret.Name)
+		}
+
+		if definedSecret.Driver != "" {
+			return nil, errors.New("Docker Compose does not support secrets.*.driver")
+		}
+		if definedSecret.TemplateDriver != "" {
+			return nil, errors.New("Docker Compose does not support secrets.*.template_driver")
 		}
 
 		if definedSecret.Environment != "" {
@@ -991,7 +1085,7 @@ func buildTmpfsOptions(tmpfs *types.ServiceVolumeTmpfs) *mount.TmpfsOptions {
 }
 
 func (s *composeService) ensureNetwork(ctx context.Context, n *types.NetworkConfig) error {
-	if n.External.External {
+	if n.External {
 		return s.resolveExternalNetwork(ctx, n)
 	}
 
@@ -1124,13 +1218,27 @@ func (s *composeService) resolveExternalNetwork(ctx context.Context, n *types.Ne
 	networks, err := s.apiClient().NetworkList(ctx, moby.NetworkListOptions{
 		Filters: filters.NewArgs(filters.Arg("name", n.Name)),
 	})
+
 	if err != nil {
 		return err
 	}
 
+	if len(networks) == 0 {
+		// in this instance, n.Name is really an ID
+		sn, err := s.apiClient().NetworkInspect(ctx, n.Name, moby.NetworkInspectOptions{})
+		if err != nil {
+			return err
+		}
+		networks = append(networks, sn)
+
+	}
+
 	// NetworkList API doesn't return the exact name match, so we can retrieve more than one network with a request
 	networks = utils.Filter(networks, func(net moby.NetworkResource) bool {
-		return net.Name == n.Name
+		// later in this function, the name is changed the to ID.
+		// this function is called during the rebuild stage of `compose watch`.
+		// we still require just one network back, but we need to run the search on the ID
+		return net.Name == n.Name || net.ID == n.Name
 	})
 
 	switch len(networks) {
@@ -1138,19 +1246,16 @@ func (s *composeService) resolveExternalNetwork(ctx context.Context, n *types.Ne
 		n.Name = networks[0].ID
 		return nil
 	case 0:
-		if n.Driver == "overlay" {
+		enabled, err := s.isSWarmEnabled(ctx)
+		if err != nil {
+			return err
+		}
+		if enabled {
 			// Swarm nodes do not register overlay networks that were
 			// created on a different node unless they're in use.
-			// Here we assume `driver` is relevant for a network we don't manage
-			// which is a non-sense, but this is our legacy ¯\(ツ)/¯
+			// So we can't preemptively check network exists, but
 			// networkAttach will later fail anyway if network actually doesn't exists
-			enabled, err := s.isSWarmEnabled(ctx)
-			if err != nil {
-				return err
-			}
-			if enabled {
-				return nil
-			}
+			return nil
 		}
 		return fmt.Errorf("network %s declared as external, but could not be found", n.Name)
 	default:
@@ -1164,14 +1269,14 @@ func (s *composeService) ensureVolume(ctx context.Context, volume types.VolumeCo
 		if !errdefs.IsNotFound(err) {
 			return err
 		}
-		if volume.External.External {
+		if volume.External {
 			return fmt.Errorf("external volume %q not found", volume.Name)
 		}
 		err := s.createVolume(ctx, volume)
 		return err
 	}
 
-	if volume.External.External {
+	if volume.External {
 		return nil
 	}
 

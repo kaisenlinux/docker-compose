@@ -24,7 +24,7 @@ import (
 
 	"github.com/docker/cli/cli/command"
 
-	"github.com/compose-spec/compose-go/types"
+	"github.com/compose-spec/compose-go/v2/types"
 	"golang.org/x/exp/maps"
 
 	"github.com/docker/compose/v2/pkg/api"
@@ -67,24 +67,18 @@ func runScale(ctx context.Context, dockerCli command.Cli, backend api.Service, o
 	}
 
 	if opts.noDeps {
-		if err := project.ForServices(services, types.IgnoreDependencies); err != nil {
+		if project, err = project.WithSelectedServices(services, types.IgnoreDependencies); err != nil {
 			return err
 		}
 	}
 
 	for key, value := range serviceReplicaTuples {
-		for i, service := range project.Services {
-			if service.Name != key {
-				continue
-			}
-			if service.Deploy == nil {
-				service.Deploy = &types.DeployConfig{}
-			}
-			scale := uint64(value)
-			service.Deploy.Replicas = &scale
-			project.Services[i] = service
-			break
+		service, err := project.GetService(key)
+		if err != nil {
+			return err
 		}
+		service.SetScale(value)
+		project.Services[key] = service
 	}
 
 	return backend.Scale(ctx, project, api.ScaleOptions{Services: services})

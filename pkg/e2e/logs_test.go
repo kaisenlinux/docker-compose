@@ -17,7 +17,6 @@
 package e2e
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -55,6 +54,17 @@ func TestLocalComposeLogs(t *testing.T) {
 		res.Assert(t, icmd.Expected{Out: `hello`})
 	})
 
+	t.Run("logs hello index", func(t *testing.T) {
+		res := c.RunDockerComposeCmd(t, "--project-name", projectName, "logs", "--index", "2", "hello")
+
+		//  docker-compose logs hello
+		// logs-test-hello-2  | hello
+		// logs-test-hello-1  | hello
+		t.Log(res.Stdout())
+		assert.Assert(t, !strings.Contains(res.Stdout(), "hello-1"))
+		assert.Assert(t, strings.Contains(res.Stdout(), "hello-2"))
+	})
+
 	t.Run("down", func(t *testing.T) {
 		_ = c.RunDockerComposeCmd(t, "--project-name", projectName, "down")
 	})
@@ -75,18 +85,15 @@ func TestLocalComposeLogsFollow(t *testing.T) {
 		_ = res.Cmd.Process.Kill()
 	})
 
-	expected := fmt.Sprintf("%s-ping-1 ", projectName)
-	poll.WaitOn(t, expectOutput(res, expected), poll.WithDelay(100*time.Millisecond), poll.WithTimeout(1*time.Second))
+	poll.WaitOn(t, expectOutput(res, "ping-1 "), poll.WithDelay(100*time.Millisecond), poll.WithTimeout(1*time.Second))
 
 	c.RunDockerComposeCmd(t, "-f", "./fixtures/logs-test/compose.yaml", "--project-name", projectName, "up", "-d")
 
-	expected = fmt.Sprintf("%s-hello-1 ", projectName)
-	poll.WaitOn(t, expectOutput(res, expected), poll.WithDelay(100*time.Millisecond), poll.WithTimeout(1*time.Second))
+	poll.WaitOn(t, expectOutput(res, "hello-1 "), poll.WithDelay(100*time.Millisecond), poll.WithTimeout(1*time.Second))
 
 	c.RunDockerComposeCmd(t, "-f", "./fixtures/logs-test/compose.yaml", "--project-name", projectName, "up", "-d", "--scale", "ping=2", "ping")
 
-	expected = fmt.Sprintf("%s-ping-2 ", projectName)
-	poll.WaitOn(t, expectOutput(res, expected), poll.WithDelay(100*time.Millisecond), poll.WithTimeout(20*time.Second))
+	poll.WaitOn(t, expectOutput(res, "ping-2 "), poll.WithDelay(100*time.Millisecond), poll.WithTimeout(20*time.Second))
 }
 
 func expectOutput(res *icmd.Result, expected string) func(t poll.LogT) poll.Result {

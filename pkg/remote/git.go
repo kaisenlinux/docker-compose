@@ -25,10 +25,9 @@ import (
 	"regexp"
 	"strconv"
 
-	"github.com/adrg/xdg"
-	"github.com/compose-spec/compose-go/cli"
-	"github.com/compose-spec/compose-go/loader"
-	"github.com/compose-spec/compose-go/types"
+	"github.com/compose-spec/compose-go/v2/cli"
+	"github.com/compose-spec/compose-go/v2/loader"
+	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/docker/compose/v2/pkg/api"
 	"github.com/moby/buildkit/util/gitutil"
 )
@@ -46,25 +45,16 @@ func gitRemoteLoaderEnabled() (bool, error) {
 	return false, nil
 }
 
-func NewGitRemoteLoader(offline bool) (loader.ResourceLoader, error) {
-	// xdg.CacheFile creates the parent directories for the target file path
-	// and returns the fully qualified path, so use "git" as a filename and
-	// then chop it off after, i.e. no ~/.cache/docker-compose/git file will
-	// ever be created
-	cache, err := xdg.CacheFile(filepath.Join("docker-compose", "git"))
-	if err != nil {
-		return nil, fmt.Errorf("initializing git cache: %w", err)
-	}
-	cache = filepath.Dir(cache)
+func NewGitRemoteLoader(offline bool) loader.ResourceLoader {
 	return gitRemoteLoader{
-		cache:   cache,
 		offline: offline,
-	}, err
+		known:   map[string]string{},
+	}
 }
 
 type gitRemoteLoader struct {
-	cache   string
 	offline bool
+	known   map[string]string
 }
 
 func (g gitRemoteLoader) Accept(path string) bool {
@@ -88,41 +78,34 @@ func (g gitRemoteLoader) Load(ctx context.Context, path string) (string, error) 
 		return "", err
 	}
 
-	if ref.Commit == "" {
-		ref.Commit = "HEAD" // default branch
-	}
+	local, ok := g.known[path]
+	if !ok {
+		if ref.Commit == "" {
+			ref.Commit = "HEAD" // default branch
+		}
 
-	if !commitSHA.MatchString(ref.Commit) {
-		cmd := exec.CommandContext(ctx, "git", "ls-remote", "--exit-code", ref.Remote, ref.Commit)
-		cmd.Env = g.gitCommandEnv()
-		out, err := cmd.Output()
+		err = g.resolveGitRef(ctx, path, ref)
 		if err != nil {
-			if cmd.ProcessState.ExitCode() == 2 {
-				return "", fmt.Errorf("repository does not contain ref %s, output: %q: %w", path, string(out), err)
+			return "", err
+		}
+
+		cache, err := cacheDir()
+		if err != nil {
+			return "", fmt.Errorf("initializing remote resource cache: %w", err)
+		}
+
+		local = filepath.Join(cache, ref.Commit)
+		if _, err := os.Stat(local); os.IsNotExist(err) {
+			if g.offline {
+				return "", nil
 			}
-			return "", err
+			err = g.checkout(ctx, local, ref)
+			if err != nil {
+				return "", err
+			}
 		}
-		if len(out) < 40 {
-			return "", fmt.Errorf("unexpected git command output: %q", string(out))
-		}
-		sha := string(out[:40])
-		if !commitSHA.MatchString(sha) {
-			return "", fmt.Errorf("invalid commit sha %q", sha)
-		}
-		ref.Commit = sha
+		g.known[path] = local
 	}
-
-	local := filepath.Join(g.cache, ref.Commit)
-	if _, err := os.Stat(local); os.IsNotExist(err) {
-		if g.offline {
-			return "", nil
-		}
-		err = g.checkout(ctx, local, ref)
-		if err != nil {
-			return "", err
-		}
-	}
-
 	if ref.SubDir != "" {
 		local = filepath.Join(local, ref.SubDir)
 	}
@@ -134,6 +117,33 @@ func (g gitRemoteLoader) Load(ctx context.Context, path string) (string, error) 
 		local, err = findFile(cli.DefaultFileNames, local)
 	}
 	return local, err
+}
+
+func (g gitRemoteLoader) Dir(path string) string {
+	return g.known[path]
+}
+
+func (g gitRemoteLoader) resolveGitRef(ctx context.Context, path string, ref *gitutil.GitRef) error {
+	if !commitSHA.MatchString(ref.Commit) {
+		cmd := exec.CommandContext(ctx, "git", "ls-remote", "--exit-code", ref.Remote, ref.Commit)
+		cmd.Env = g.gitCommandEnv()
+		out, err := cmd.Output()
+		if err != nil {
+			if cmd.ProcessState.ExitCode() == 2 {
+				return fmt.Errorf("repository does not contain ref %s, output: %q: %w", path, string(out), err)
+			}
+			return err
+		}
+		if len(out) < 40 {
+			return fmt.Errorf("unexpected git command output: %q", string(out))
+		}
+		sha := string(out[:40])
+		if !commitSHA.MatchString(sha) {
+			return fmt.Errorf("invalid commit sha %q", sha)
+		}
+		ref.Commit = sha
+	}
+	return nil
 }
 
 func (g gitRemoteLoader) checkout(ctx context.Context, path string, ref *gitutil.GitRef) error {

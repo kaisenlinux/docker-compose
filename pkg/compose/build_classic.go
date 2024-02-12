@@ -31,7 +31,7 @@ import (
 
 	"github.com/docker/docker/api/types/registry"
 
-	"github.com/compose-spec/compose-go/types"
+	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command/image/build"
 	dockertypes "github.com/docker/docker/api/types"
@@ -229,7 +229,7 @@ func imageBuildOptions(dockerCli command.Cli, project *types.Project, service ty
 		BuildArgs:   resolveAndMergeBuildArgs(dockerCli, project, service, options),
 		Labels:      config.Labels,
 		NetworkMode: config.Network,
-		ExtraHosts:  config.ExtraHosts.AsList(),
+		ExtraHosts:  config.ExtraHosts.AsList(":"),
 		Target:      config.Target,
 		Isolation:   container.Isolation(config.Isolation),
 	}

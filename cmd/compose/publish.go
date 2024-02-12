@@ -25,11 +25,17 @@ import (
 	"github.com/docker/compose/v2/pkg/api"
 )
 
+type publishOptions struct {
+	*ProjectOptions
+	resolveImageDigests bool
+	ociVersion          string
+}
+
 func publishCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service) *cobra.Command {
-	opts := pushOptions{
+	opts := publishOptions{
 		ProjectOptions: p,
 	}
-	publishCmd := &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "publish [OPTIONS] [REPOSITORY]",
 		Short: "Publish compose application",
 		RunE: Adapt(func(ctx context.Context, args []string) error {
@@ -37,14 +43,20 @@ func publishCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Servic
 		}),
 		Args: cobra.ExactArgs(1),
 	}
-	return publishCmd
+	flags := cmd.Flags()
+	flags.BoolVar(&opts.resolveImageDigests, "resolve-image-digests", false, "Pin image tags to digests.")
+	flags.StringVar(&opts.ociVersion, "oci-version", "", "OCI Image/Artifact specification version (automatically determined by default)")
+	return cmd
 }
 
-func runPublish(ctx context.Context, dockerCli command.Cli, backend api.Service, opts pushOptions, repository string) error {
+func runPublish(ctx context.Context, dockerCli command.Cli, backend api.Service, opts publishOptions, repository string) error {
 	project, err := opts.ToProject(dockerCli, nil)
 	if err != nil {
 		return err
 	}
 
-	return backend.Publish(ctx, project, repository, api.PublishOptions{})
+	return backend.Publish(ctx, project, repository, api.PublishOptions{
+		ResolveImageDigests: opts.resolveImageDigests,
+		OCIVersion:          api.OCIVersion(opts.ociVersion),
+	})
 }

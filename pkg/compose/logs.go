@@ -20,10 +20,10 @@ import (
 	"context"
 	"errors"
 	"io"
-	"strings"
 	"time"
 
 	"github.com/docker/docker/api/types"
+	containerType "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/sirupsen/logrus"
@@ -39,11 +39,21 @@ func (s *composeService) Logs(
 	consumer api.LogConsumer,
 	options api.LogOptions,
 ) error {
-	projectName = strings.ToLower(projectName)
 
-	containers, err := s.getContainers(ctx, projectName, oneOffExclude, true, options.Services...)
-	if err != nil {
-		return err
+	var containers Containers
+	var err error
+
+	if options.Index > 0 {
+		container, err := s.getSpecifiedContainer(ctx, projectName, oneOffExclude, true, options.Services[0], options.Index)
+		if err != nil {
+			return err
+		}
+		containers = append(containers, container)
+	} else {
+		containers, err = s.getContainers(ctx, projectName, oneOffExclude, true, options.Services...)
+		if err != nil {
+			return err
+		}
 	}
 
 	if options.Project != nil && len(options.Services) == 0 {
@@ -130,7 +140,7 @@ func (s *composeService) logContainers(ctx context.Context, consumer api.LogCons
 		return err
 	}
 
-	r, err := s.apiClient().ContainerLogs(ctx, cnt.ID, types.ContainerLogsOptions{
+	r, err := s.apiClient().ContainerLogs(ctx, cnt.ID, containerType.LogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
 		Follow:     options.Follow,

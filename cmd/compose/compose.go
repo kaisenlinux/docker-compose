@@ -27,16 +27,16 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/compose-spec/compose-go/cli"
-	"github.com/compose-spec/compose-go/dotenv"
-	"github.com/compose-spec/compose-go/types"
-	composegoutils "github.com/compose-spec/compose-go/utils"
+	"github.com/compose-spec/compose-go/v2/cli"
+	"github.com/compose-spec/compose-go/v2/dotenv"
+	"github.com/compose-spec/compose-go/v2/types"
+	composegoutils "github.com/compose-spec/compose-go/v2/utils"
 	"github.com/docker/buildx/util/logutil"
-	buildx "github.com/docker/buildx/util/progress"
 	dockercli "github.com/docker/cli/cli"
 	"github.com/docker/cli/cli-plugins/manager"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/compose/v2/pkg/remote"
+	buildkit "github.com/moby/buildkit/util/progress/progressui"
 	"github.com/morikuni/aec"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -73,18 +73,17 @@ type CobraCommand func(context.Context, *cobra.Command, []string) error
 // AdaptCmd adapt a CobraCommand func to cobra library
 func AdaptCmd(fn CobraCommand) func(cmd *cobra.Command, args []string) error {
 	return func(cmd *cobra.Command, args []string) error {
-		ctx := cmd.Context()
-		contextString := fmt.Sprintf("%s", ctx)
-		if !strings.HasSuffix(contextString, ".WithCancel") { // need to handle cancel
-			cancellableCtx, cancel := context.WithCancel(cmd.Context())
-			ctx = cancellableCtx
-			s := make(chan os.Signal, 1)
-			signal.Notify(s, syscall.SIGTERM, syscall.SIGINT)
-			go func() {
-				<-s
-				cancel()
-			}()
-		}
+		ctx, cancel := context.WithCancel(cmd.Context())
+
+		s := make(chan os.Signal, 1)
+		signal.Notify(s, syscall.SIGTERM, syscall.SIGINT)
+		go func() {
+			<-s
+			cancel()
+			signal.Stop(s)
+			close(s)
+		}()
+
 		err := fn(ctx, cmd, args)
 		var composeErr compose.Error
 		if api.IsErrCanceled(err) || errors.Is(ctx.Err(), context.Canceled) {
@@ -161,7 +160,7 @@ func (o *ProjectOptions) addProjectFlags(f *pflag.FlagSet) {
 	f.StringVar(&o.ProjectDir, "project-directory", "", "Specify an alternate working directory\n(default: the path of the, first specified, Compose file)")
 	f.StringVar(&o.WorkDir, "workdir", "", "DEPRECATED! USE --project-directory INSTEAD.\nSpecify an alternate working directory\n(default: the path of the, first specified, Compose file)")
 	f.BoolVar(&o.Compatibility, "compatibility", false, "Run compose in backward compatibility mode")
-	f.StringVar(&o.Progress, "progress", buildx.PrinterModeAuto, fmt.Sprintf(`Set type of progress output (%s)`, strings.Join(printerModes, ", ")))
+	f.StringVar(&o.Progress, "progress", string(buildkit.AutoMode), fmt.Sprintf(`Set type of progress output (%s)`, strings.Join(printerModes, ", ")))
 	_ = f.MarkHidden("workdir")
 }
 
@@ -202,11 +201,7 @@ func (o *ProjectOptions) toProjectName(dockerCli command.Cli) (string, error) {
 
 func (o *ProjectOptions) ToProject(dockerCli command.Cli, services []string, po ...cli.ProjectOptionsFn) (*types.Project, error) {
 	if !o.Offline {
-		var err error
-		po, err = o.configureRemoteLoaders(dockerCli, po)
-		if err != nil {
-			return nil, err
-		}
+		po = o.configureRemoteLoaders(dockerCli, po)
 	}
 
 	options, err := o.toProjectOptions(po...)
@@ -227,15 +222,15 @@ func (o *ProjectOptions) ToProject(dockerCli command.Cli, services []string, po 
 		return nil, errors.New("project name can't be empty. Use `--project-name` to set a valid name")
 	}
 
-	err = project.EnableServices(services...)
+	project, err = project.WithServicesEnabled(services...)
 	if err != nil {
 		return nil, err
 	}
 
-	for i, s := range project.Services {
+	for name, s := range project.Services {
 		s.CustomLabels = map[string]string{
 			api.ProjectLabel:     project.Name,
-			api.ServiceLabel:     s.Name,
+			api.ServiceLabel:     name,
 			api.VersionLabel:     api.ComposeVersion,
 			api.WorkingDirLabel:  project.WorkingDir,
 			api.ConfigFilesLabel: strings.Join(project.ComposeFiles, ","),
@@ -244,28 +239,21 @@ func (o *ProjectOptions) ToProject(dockerCli command.Cli, services []string, po 
 		if len(o.EnvFiles) != 0 {
 			s.CustomLabels[api.EnvironmentFileLabel] = strings.Join(o.EnvFiles, ",")
 		}
-		project.Services[i] = s
+		project.Services[name] = s
 	}
 
-	project.WithoutUnnecessaryResources()
+	project = project.WithoutUnnecessaryResources()
 
-	err = project.ForServices(services)
+	project, err = project.WithSelectedServices(services)
 	return project, err
 }
 
-func (o *ProjectOptions) configureRemoteLoaders(dockerCli command.Cli, po []cli.ProjectOptionsFn) ([]cli.ProjectOptionsFn, error) {
-	git, err := remote.NewGitRemoteLoader(o.Offline)
-	if err != nil {
-		return nil, err
-	}
-
-	oci, err := remote.NewOCIRemoteLoader(dockerCli, o.Offline)
-	if err != nil {
-		return nil, err
-	}
+func (o *ProjectOptions) configureRemoteLoaders(dockerCli command.Cli, po []cli.ProjectOptionsFn) []cli.ProjectOptionsFn {
+	git := remote.NewGitRemoteLoader(o.Offline)
+	oci := remote.NewOCIRemoteLoader(dockerCli, o.Offline)
 
 	po = append(po, cli.WithResourceLoader(git), cli.WithResourceLoader(oci))
-	return po, nil
+	return po
 }
 
 func (o *ProjectOptions) toProjectOptions(po ...cli.ProjectOptionsFn) (*cli.ProjectOptions, error) {
@@ -453,6 +441,7 @@ func RootCommand(dockerCli command.Cli, backend api.Service) *cobra.Command { //
 		runCommand(&opts, dockerCli, backend),
 		removeCommand(&opts, dockerCli, backend),
 		execCommand(&opts, dockerCli, backend),
+		attachCommand(&opts, dockerCli, backend),
 		pauseCommand(&opts, dockerCli, backend),
 		unpauseCommand(&opts, dockerCli, backend),
 		topCommand(&opts, dockerCli, backend),
@@ -467,6 +456,7 @@ func RootCommand(dockerCli command.Cli, backend api.Service) *cobra.Command { //
 		copyCommand(&opts, dockerCli, backend),
 		waitCommand(&opts, dockerCli, backend),
 		scaleCommand(&opts, dockerCli, backend),
+		statsCommand(&opts, dockerCli),
 		watchCommand(&opts, dockerCli, backend),
 		alphaCommand(&opts, dockerCli, backend),
 	)
@@ -516,12 +506,8 @@ func setEnvWithDotEnv(prjOpts *ProjectOptions) error {
 	if err != nil {
 		return compose.WrapComposeError(err)
 	}
-	workingDir, err := options.GetWorkingDir()
-	if err != nil {
-		return err
-	}
 
-	envFromFile, err := dotenv.GetEnvFromFile(composegoutils.GetAsEqualsMap(os.Environ()), workingDir, options.EnvFiles)
+	envFromFile, err := dotenv.GetEnvFromFile(composegoutils.GetAsEqualsMap(os.Environ()), options.EnvFiles)
 	if err != nil {
 		return err
 	}

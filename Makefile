@@ -32,9 +32,13 @@ endif
 BUILD_FLAGS?=
 TEST_FLAGS?=
 E2E_TEST?=
-ifeq ($(E2E_TEST),)
-else
-	TEST_FLAGS=-run $(E2E_TEST)
+ifneq ($(E2E_TEST),)
+	TEST_FLAGS:=$(TEST_FLAGS) -run '$(E2E_TEST)'
+endif
+
+EXCLUDE_E2E_TESTS?=
+ifneq ($(EXCLUDE_E2E_TESTS),)
+	TEST_FLAGS:=$(TEST_FLAGS) -skip '$(EXCLUDE_E2E_TESTS)'
 endif
 
 BUILDX_CMD ?= docker buildx
@@ -85,7 +89,7 @@ build-and-e2e-compose-standalone: build e2e-compose-standalone ## Compile the co
 
 .PHONY: mocks
 mocks:
-	mockgen --version >/dev/null 2>&1 || go install github.com/golang/mock/mockgen@v1.6.0
+	mockgen --version >/dev/null 2>&1 || go install go.uber.org/mock/mockgen@v0.3.0
 	mockgen -destination pkg/mocks/mock_docker_cli.go -package mocks github.com/docker/cli/cli/command Cli
 	mockgen -destination pkg/mocks/mock_docker_api.go -package mocks github.com/docker/docker/client APIClient
 	mockgen -destination pkg/mocks/mock_docker_compose_api.go -package mocks -source=./pkg/api/api.go Service

@@ -1,13 +1,13 @@
 Author: Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>
 
---- docker-compose-2.23.0.orig/Makefile
-+++ docker-compose-2.23.0/Makefile
+--- docker-compose-2.24.5.orig/Makefile
++++ docker-compose-2.24.5/Makefile
 @@ -13,7 +13,7 @@
  #   limitations under the License.
  
  PKG := github.com/docker/compose/v2
 -VERSION ?= $(shell git describe --match 'v[0-9]*' --dirty='.m' --always --tags)
-+VERSION ?= 2.23.0
++VERSION ?= 2.24.5
  
  GO_LDFLAGS ?= -w -X ${PKG}/internal.Version=${VERSION}
  GO_BUILDTAGS ?= e2e

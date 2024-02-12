@@ -19,15 +19,15 @@ package compose
 import (
 	"testing"
 
-	"github.com/compose-spec/compose-go/types"
+	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/stretchr/testify/require"
 )
 
 func TestApplyPlatforms_InferFromRuntime(t *testing.T) {
 	makeProject := func() *types.Project {
 		return &types.Project{
-			Services: []types.ServiceConfig{
-				{
+			Services: types.Services{
+				"test": {
 					Name:  "test",
 					Image: "foo",
 					Build: &types.BuildConfig{
@@ -47,14 +47,14 @@ func TestApplyPlatforms_InferFromRuntime(t *testing.T) {
 	t.Run("SinglePlatform", func(t *testing.T) {
 		project := makeProject()
 		require.NoError(t, applyPlatforms(project, true))
-		require.EqualValues(t, []string{"alice/32"}, project.Services[0].Build.Platforms)
+		require.EqualValues(t, []string{"alice/32"}, project.Services["test"].Build.Platforms)
 	})
 
 	t.Run("MultiPlatform", func(t *testing.T) {
 		project := makeProject()
 		require.NoError(t, applyPlatforms(project, false))
 		require.EqualValues(t, []string{"linux/amd64", "linux/arm64", "alice/32"},
-			project.Services[0].Build.Platforms)
+			project.Services["test"].Build.Platforms)
 	})
 }
 
@@ -64,8 +64,8 @@ func TestApplyPlatforms_DockerDefaultPlatform(t *testing.T) {
 			Environment: map[string]string{
 				"DOCKER_DEFAULT_PLATFORM": "linux/amd64",
 			},
-			Services: []types.ServiceConfig{
-				{
+			Services: types.Services{
+				"test": {
 					Name:  "test",
 					Image: "foo",
 					Build: &types.BuildConfig{
@@ -83,14 +83,14 @@ func TestApplyPlatforms_DockerDefaultPlatform(t *testing.T) {
 	t.Run("SinglePlatform", func(t *testing.T) {
 		project := makeProject()
 		require.NoError(t, applyPlatforms(project, true))
-		require.EqualValues(t, []string{"linux/amd64"}, project.Services[0].Build.Platforms)
+		require.EqualValues(t, []string{"linux/amd64"}, project.Services["test"].Build.Platforms)
 	})
 
 	t.Run("MultiPlatform", func(t *testing.T) {
 		project := makeProject()
 		require.NoError(t, applyPlatforms(project, false))
 		require.EqualValues(t, []string{"linux/amd64", "linux/arm64"},
-			project.Services[0].Build.Platforms)
+			project.Services["test"].Build.Platforms)
 	})
 }
 
@@ -100,8 +100,8 @@ func TestApplyPlatforms_UnsupportedPlatform(t *testing.T) {
 			Environment: map[string]string{
 				"DOCKER_DEFAULT_PLATFORM": "commodore/64",
 			},
-			Services: []types.ServiceConfig{
-				{
+			Services: types.Services{
+				"test": {
 					Name:  "test",
 					Image: "foo",
 					Build: &types.BuildConfig{

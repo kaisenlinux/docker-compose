@@ -22,7 +22,7 @@ import (
 
 	"github.com/docker/compose/v2/pkg/utils"
 
-	"github.com/compose-spec/compose-go/types"
+	"github.com/compose-spec/compose-go/v2/types"
 	moby "github.com/docker/docker/api/types"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -58,17 +58,12 @@ func ProjectOptions(proj *types.Project) SpanOptions {
 		return nil
 	}
 
-	disabledServiceNames := make([]string, len(proj.DisabledServices))
-	for i := range proj.DisabledServices {
-		disabledServiceNames[i] = proj.DisabledServices[i].Name
-	}
-
 	attrs := []attribute.KeyValue{
 		attribute.String("project.name", proj.Name),
 		attribute.String("project.dir", proj.WorkingDir),
 		attribute.StringSlice("project.compose_files", proj.ComposeFiles),
 		attribute.StringSlice("project.services.active", proj.ServiceNames()),
-		attribute.StringSlice("project.services.disabled", disabledServiceNames),
+		attribute.StringSlice("project.services.disabled", proj.DisabledServiceNames()),
 		attribute.StringSlice("project.profiles", proj.Profiles),
 		attribute.StringSlice("project.volumes", proj.VolumeNames()),
 		attribute.StringSlice("project.networks", proj.NetworkNames()),

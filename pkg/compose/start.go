@@ -23,13 +23,14 @@ import (
 	"strings"
 	"time"
 
+	containerType "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/errdefs"
 
 	"github.com/docker/compose/v2/pkg/api"
 	"github.com/docker/compose/v2/pkg/progress"
 	"github.com/docker/compose/v2/pkg/utils"
 
-	"github.com/compose-spec/compose-go/types"
+	"github.com/compose-spec/compose-go/v2/types"
 	moby "github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/filters"
 	"golang.org/x/sync/errgroup"
@@ -111,7 +112,7 @@ func (s *composeService) start(ctx context.Context, projectName string, options 
 	}
 
 	var containers Containers
-	containers, err := s.apiClient().ContainerList(ctx, moby.ContainerListOptions{
+	containers, err := s.apiClient().ContainerList(ctx, containerType.ListOptions{
 		Filters: filters.NewArgs(
 			projectFilter(project.Name),
 			oneOffFilter(false),
@@ -128,7 +129,7 @@ func (s *composeService) start(ctx context.Context, projectName string, options 
 			return err
 		}
 
-		return s.startService(ctx, project, service, containers)
+		return s.startService(ctx, project, service, containers, options.Wait)
 	})
 	if err != nil {
 		return err
@@ -148,7 +149,7 @@ func (s *composeService) start(ctx context.Context, projectName string, options 
 			defer cancel()
 		}
 
-		err = s.waitDependencies(ctx, project, depends, containers)
+		err = s.waitDependencies(ctx, project, project.Name, depends, containers)
 		if err != nil {
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				return fmt.Errorf("application not healthy after %s", options.WaitTimeout)

@@ -27,7 +27,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/compose-spec/compose-go/types"
+	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/docker/compose/v2/internal/sync"
 	"github.com/docker/compose/v2/pkg/api"
 	"github.com/docker/compose/v2/pkg/watch"
@@ -64,7 +64,8 @@ func (s *composeService) getSyncImplementation(project *types.Project) sync.Sync
 }
 
 func (s *composeService) Watch(ctx context.Context, project *types.Project, services []string, options api.WatchOptions) error { //nolint: gocyclo
-	if err := project.ForServices(services); err != nil {
+	var err error
+	if project, err = project.WithSelectedServices(services); err != nil {
 		return err
 	}
 	syncer := s.getSyncImplementation(project)
@@ -121,13 +122,14 @@ func (s *composeService) Watch(ctx context.Context, project *types.Project, serv
 			dotGitIgnore,
 		)
 
-		var paths []string
+		var paths, pathLogs []string
 		for _, trigger := range config.Watch {
 			if checkIfPathAlreadyBindMounted(trigger.Path, service.Volumes) {
 				logrus.Warnf("path '%s' also declared by a bind mount volume, this path won't be monitored!\n", trigger.Path)
 				continue
 			}
 			paths = append(paths, trigger.Path)
+			pathLogs = append(pathLogs, fmt.Sprintf("Action %s for path %q", trigger.Action, trigger.Path))
 		}
 
 		watcher, err := watch.NewWatcher(paths, ignore)
@@ -135,7 +137,12 @@ func (s *composeService) Watch(ctx context.Context, project *types.Project, serv
 			return err
 		}
 
-		fmt.Fprintf(s.stdinfo(), "watching %s\n", paths)
+		fmt.Fprintf(
+			s.stdinfo(),
+			"Watch configuration for service %q:%s\n",
+			service.Name,
+			strings.Join(append([]string{""}, pathLogs...), "\n  - "),
+		)
 		err = watcher.Start()
 		if err != nil {
 			return err
@@ -413,6 +420,12 @@ func (t tarDockerClient) Exec(ctx context.Context, containerID string, cmd []str
 	return nil
 }
 
+func (t tarDockerClient) Untar(ctx context.Context, id string, archive io.ReadCloser) error {
+	return t.s.apiClient().CopyToContainer(ctx, id, "/", archive, moby.CopyToContainerOptions{
+		CopyUIDGID: true,
+	})
+}
+
 func (s *composeService) handleWatchBatch(ctx context.Context, project *types.Project, serviceName string, build api.BuildOptions, batch []fileEvent, syncer sync.Syncer) error {
 	pathMappings := make([]sync.PathMapping, len(batch))
 	restartService := false
@@ -420,7 +433,7 @@ func (s *composeService) handleWatchBatch(ctx context.Context, project *types.Pr
 		if batch[i].Action == types.WatchActionRebuild {
 			fmt.Fprintf(
 				s.stdinfo(),
-				"Rebuilding %s after changes were detected:%s\n",
+				"Rebuilding service %q after changes were detected:%s\n",
 				serviceName,
 				strings.Join(append([]string{""}, batch[i].HostPath), "\n  - "),
 			)
@@ -438,7 +451,7 @@ func (s *composeService) handleWatchBatch(ctx context.Context, project *types.Pr
 				},
 			})
 			if err != nil {
-				fmt.Fprintf(s.stderr(), "Application failed to start after update\n")
+				fmt.Fprintf(s.stderr(), "Application failed to start after update. Error: %v\n", err)
 			}
 			return nil
 		}
@@ -477,7 +490,7 @@ func writeWatchSyncMessage(w io.Writer, serviceName string, pathMappings []sync.
 		}
 		fmt.Fprintf(
 			w,
-			"Syncing %s after changes were detected:%s\n",
+			"Syncing %q after changes were detected:%s\n",
 			serviceName,
 			strings.Join(append([]string{""}, hostPathsToSync...), "\n  - "),
 		)
@@ -488,7 +501,7 @@ func writeWatchSyncMessage(w io.Writer, serviceName string, pathMappings []sync.
 		}
 		fmt.Fprintf(
 			w,
-			"Syncing %s after %d changes were detected\n",
+			"Syncing service %q after %d changes were detected\n",
 			serviceName,
 			len(pathMappings),
 		)

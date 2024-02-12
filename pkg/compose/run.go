@@ -23,7 +23,7 @@ import (
 	"os"
 	"os/signal"
 
-	"github.com/compose-spec/compose-go/types"
+	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/docker/cli/cli"
 	cmd "github.com/docker/cli/cli/command/container"
 	"github.com/docker/compose/v2/pkg/api"
@@ -42,10 +42,10 @@ func (s *composeService) RunOneOffContainer(ctx context.Context, project *types.
 
 	sigc := make(chan os.Signal, 128)
 	signal.Notify(sigc)
-	go cmd.ForwardAllSignals(ctx, s.dockerCli, containerID, sigc)
+	go cmd.ForwardAllSignals(ctx, s.apiClient(), containerID, sigc)
 	defer signal.Stop(sigc)
 
-	err = cmd.RunStart(s.dockerCli, &cmd.StartOptions{
+	err = cmd.RunStart(ctx, s.dockerCli, &cmd.StartOptions{
 		OpenStdin:  !opts.Detach && opts.Interactive,
 		Attach:     !opts.Detach,
 		Containers: []string{containerID},
@@ -73,7 +73,8 @@ func (s *composeService) prepareRun(ctx context.Context, project *types.Project,
 	if service.ContainerName == "" {
 		service.ContainerName = fmt.Sprintf("%[1]s%[4]s%[2]s%[4]srun%[4]s%[3]s", project.Name, service.Name, stringid.TruncateID(slug), api.Separator)
 	}
-	service.Scale = 1
+	one := 1
+	service.Scale = &one
 	service.Restart = ""
 	if service.Deploy != nil {
 		service.Deploy.RestartPolicy = nil
@@ -92,7 +93,7 @@ func (s *composeService) prepareRun(ctx context.Context, project *types.Project,
 	}
 
 	if !opts.NoDeps {
-		if err := s.waitDependencies(ctx, project, service.DependsOn, observedState); err != nil {
+		if err := s.waitDependencies(ctx, project, service.Name, service.DependsOn, observedState); err != nil {
 			return "", err
 		}
 	}

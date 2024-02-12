@@ -21,13 +21,13 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/compose-spec/compose-go/types"
+	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/docker/compose/v2/pkg/api"
 	"github.com/docker/compose/v2/pkg/mocks"
-	"github.com/golang/mock/gomock"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 )
 
 func TestRunCreate(t *testing.T) {
@@ -86,7 +86,7 @@ func sampleProject() *types.Project {
 	return &types.Project{
 		Name: "test",
 		Services: types.Services{
-			{
+			"svc": {
 				Name: "svc",
 				Build: &types.BuildConfig{
 					Context: ".",

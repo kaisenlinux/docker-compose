@@ -24,7 +24,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/compose-spec/compose-go/types"
+	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/docker/cli/cli/command"
 	"github.com/spf13/cobra"
 
@@ -74,7 +74,7 @@ func createCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service
 	flags := cmd.Flags()
 	flags.BoolVar(&opts.Build, "build", false, "Build images before starting containers.")
 	flags.BoolVar(&opts.noBuild, "no-build", false, "Don't build an image, even if it's policy.")
-	flags.StringVar(&opts.Pull, "pull", "policy", `Pull image before running ("always"|"policy"|"never")`)
+	flags.StringVar(&opts.Pull, "pull", "policy", `Pull image before running ("always"|"missing"|"never"|"build")`)
 	flags.BoolVar(&opts.forceRecreate, "force-recreate", false, "Recreate containers even if their configuration and image haven't changed.")
 	flags.BoolVar(&opts.noRecreate, "no-recreate", false, "If containers already exist, don't recreate them. Incompatible with --force-recreate.")
 	flags.BoolVar(&opts.removeOrphans, "remove-orphans", false, "Remove containers for services not defined in the Compose file.")
@@ -159,22 +159,20 @@ func (opts createOptions) Apply(project *types.Project) error {
 			project.Services[i] = service
 		}
 	}
-	// opts.noBuild, however, means do not perform ANY builds
-	if opts.noBuild {
-		for i, service := range project.Services {
-			service.Build = nil
-			if service.Image == "" {
-				service.Image = api.GetImageNameOrDefault(service, project.Name)
-			}
-			project.Services[i] = service
-		}
-	}
 
 	if err := applyPlatforms(project, true); err != nil {
 		return err
 	}
 
-	for _, scale := range opts.scale {
+	err := applyScaleOpts(project, opts.scale)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func applyScaleOpts(project *types.Project, opts []string) error {
+	for _, scale := range opts {
 		split := strings.Split(scale, "=")
 		if len(split) != 2 {
 			return fmt.Errorf("invalid --scale option %q. Should be SERVICE=NUM", scale)
@@ -184,7 +182,7 @@ func (opts createOptions) Apply(project *types.Project) error {
 		if err != nil {
 			return err
 		}
-		err = setServiceScale(project, name, uint64(replicas))
+		err = setServiceScale(project, name, replicas)
 		if err != nil {
 			return err
 		}
