@@ -59,22 +59,32 @@ func logsCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service) 
 		ValidArgsFunction: completeServiceNames(dockerCli, p),
 	}
 	flags := logsCmd.Flags()
-	flags.BoolVarP(&opts.follow, "follow", "f", false, "Follow log output.")
+	flags.BoolVarP(&opts.follow, "follow", "f", false, "Follow log output")
 	flags.IntVar(&opts.index, "index", 0, "index of the container if service has multiple replicas")
 	flags.StringVar(&opts.since, "since", "", "Show logs since timestamp (e.g. 2013-01-02T13:23:37Z) or relative (e.g. 42m for 42 minutes)")
 	flags.StringVar(&opts.until, "until", "", "Show logs before a timestamp (e.g. 2013-01-02T13:23:37Z) or relative (e.g. 42m for 42 minutes)")
-	flags.BoolVar(&opts.noColor, "no-color", false, "Produce monochrome output.")
-	flags.BoolVar(&opts.noPrefix, "no-log-prefix", false, "Don't print prefix in logs.")
-	flags.BoolVarP(&opts.timestamps, "timestamps", "t", false, "Show timestamps.")
-	flags.StringVarP(&opts.tail, "tail", "n", "all", "Number of lines to show from the end of the logs for each container.")
+	flags.BoolVar(&opts.noColor, "no-color", false, "Produce monochrome output")
+	flags.BoolVar(&opts.noPrefix, "no-log-prefix", false, "Don't print prefix in logs")
+	flags.BoolVarP(&opts.timestamps, "timestamps", "t", false, "Show timestamps")
+	flags.StringVarP(&opts.tail, "tail", "n", "all", "Number of lines to show from the end of the logs for each container")
 	return logsCmd
 }
 
 func runLogs(ctx context.Context, dockerCli command.Cli, backend api.Service, opts logsOptions, services []string) error {
-	project, name, err := opts.projectOrName(dockerCli, services...)
+	project, name, err := opts.projectOrName(ctx, dockerCli, services...)
 	if err != nil {
 		return err
 	}
+
+	// exclude services configured to ignore output (attach: false), until explicitly selected
+	if project != nil && len(services) == 0 {
+		for n, service := range project.Services {
+			if service.Attach == nil || *service.Attach {
+				services = append(services, n)
+			}
+		}
+	}
+
 	consumer := formatter.NewLogConsumer(ctx, dockerCli.Out(), dockerCli.Err(), !opts.noColor, !opts.noPrefix, false)
 	return backend.Logs(ctx, name, consumer, api.LogOptions{
 		Project:    project,

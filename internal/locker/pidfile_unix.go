@@ -16,29 +16,14 @@
    limitations under the License.
 */
 
-package tracing
+package locker
 
 import (
-	"context"
-	"fmt"
-	"net"
-	"strings"
-	"syscall"
+	"os"
+
+	"github.com/docker/docker/pkg/pidfile"
 )
 
-const maxUnixSocketPathSize = len(syscall.RawSockaddrUnix{}.Path)
-
-func DialInMemory(ctx context.Context, addr string) (net.Conn, error) {
-	if !strings.HasPrefix(addr, "unix://") {
-		return nil, fmt.Errorf("not a Unix socket address: %s", addr)
-	}
-	addr = strings.TrimPrefix(addr, "unix://")
-
-	if len(addr) > maxUnixSocketPathSize {
-		//goland:noinspection GoErrorStringFormat
-		return nil, fmt.Errorf("Unix socket address is too long: %s", addr)
-	}
-
-	var d net.Dialer
-	return d.DialContext(ctx, "unix", addr)
+func (f *Pidfile) Lock() error {
+	return pidfile.Write(f.path, os.Getpid())
 }

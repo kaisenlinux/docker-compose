@@ -81,7 +81,7 @@ func psCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service) *c
 	}
 	flags := psCmd.Flags()
 	flags.StringVar(&opts.Format, "format", "table", cliflags.FormatHelp)
-	flags.StringVar(&opts.Filter, "filter", "", "Filter services by a property (supported filters: status).")
+	flags.StringVar(&opts.Filter, "filter", "", "Filter services by a property (supported filters: status)")
 	flags.StringArrayVar(&opts.Status, "status", []string{}, "Filter services by status. Values: [paused | restarting | removing | running | dead | created | exited]")
 	flags.BoolVarP(&opts.Quiet, "quiet", "q", false, "Only display IDs")
 	flags.BoolVar(&opts.Services, "services", false, "Display services")
@@ -92,7 +92,7 @@ func psCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service) *c
 }
 
 func runPs(ctx context.Context, dockerCli command.Cli, backend api.Service, services []string, opts psOptions) error {
-	project, name, err := opts.projectOrName(dockerCli, services...)
+	project, name, err := opts.projectOrName(ctx, dockerCli, services...)
 	if err != nil {
 		return err
 	}
@@ -113,7 +113,7 @@ func runPs(ctx context.Context, dockerCli command.Cli, backend api.Service, serv
 
 	containers, err := backend.Ps(ctx, name, api.PsOptions{
 		Project:  project,
-		All:      opts.All,
+		All:      opts.All || len(opts.Status) != 0,
 		Services: services,
 	})
 	if err != nil {

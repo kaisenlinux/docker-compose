@@ -114,6 +114,14 @@ func TestBuildContainerMountOptions(t *testing.T) {
 						Target: "/var/myvolume2",
 					},
 					{
+						Type:   composetypes.VolumeTypeVolume,
+						Source: "myVolume3",
+						Target: "/var/myvolume3",
+						Volume: &composetypes.ServiceVolumeVolume{
+							Subpath: "etc",
+						},
+					},
+					{
 						Type:   composetypes.VolumeTypeNamedPipe,
 						Source: "\\\\.\\pipe\\docker_engine_windows",
 						Target: "\\\\.\\pipe\\docker_engine",
@@ -149,20 +157,24 @@ func TestBuildContainerMountOptions(t *testing.T) {
 		return mounts[i].Target < mounts[j].Target
 	})
 	assert.NilError(t, err)
-	assert.Assert(t, len(mounts) == 3)
+	assert.Assert(t, len(mounts) == 4)
 	assert.Equal(t, mounts[0].Target, "/var/myvolume1")
 	assert.Equal(t, mounts[1].Target, "/var/myvolume2")
-	assert.Equal(t, mounts[2].Target, "\\\\.\\pipe\\docker_engine")
+	assert.Equal(t, mounts[2].Target, "/var/myvolume3")
+	assert.Equal(t, mounts[2].VolumeOptions.Subpath, "etc")
+	assert.Equal(t, mounts[3].Target, "\\\\.\\pipe\\docker_engine")
 
 	mounts, err = buildContainerMountOptions(project, project.Services["myService"], moby.ImageInspect{}, inherit)
 	sort.Slice(mounts, func(i, j int) bool {
 		return mounts[i].Target < mounts[j].Target
 	})
 	assert.NilError(t, err)
-	assert.Assert(t, len(mounts) == 3)
+	assert.Assert(t, len(mounts) == 4)
 	assert.Equal(t, mounts[0].Target, "/var/myvolume1")
 	assert.Equal(t, mounts[1].Target, "/var/myvolume2")
-	assert.Equal(t, mounts[2].Target, "\\\\.\\pipe\\docker_engine")
+	assert.Equal(t, mounts[2].Target, "/var/myvolume3")
+	assert.Equal(t, mounts[2].VolumeOptions.Subpath, "etc")
+	assert.Equal(t, mounts[3].Target, "\\\\.\\pipe\\docker_engine")
 }
 
 func TestDefaultNetworkSettings(t *testing.T) {
@@ -193,7 +205,7 @@ func TestDefaultNetworkSettings(t *testing.T) {
 			}),
 		}
 
-		networkMode, networkConfig := defaultNetworkSettings(&project, service, 1, nil, true)
+		networkMode, networkConfig := defaultNetworkSettings(&project, service, 1, nil, true, "1.43")
 		assert.Equal(t, string(networkMode), "myProject_myNetwork2")
 		assert.Check(t, cmp.Len(networkConfig.EndpointsConfig, 1))
 		assert.Check(t, cmp.Contains(networkConfig.EndpointsConfig, "myProject_myNetwork2"))
@@ -221,7 +233,7 @@ func TestDefaultNetworkSettings(t *testing.T) {
 			}),
 		}
 
-		networkMode, networkConfig := defaultNetworkSettings(&project, service, 1, nil, true)
+		networkMode, networkConfig := defaultNetworkSettings(&project, service, 1, nil, true, "1.43")
 		assert.Equal(t, string(networkMode), "myProject_default")
 		assert.Check(t, cmp.Len(networkConfig.EndpointsConfig, 1))
 		assert.Check(t, cmp.Contains(networkConfig.EndpointsConfig, "myProject_default"))
@@ -238,7 +250,7 @@ func TestDefaultNetworkSettings(t *testing.T) {
 			},
 		}
 
-		networkMode, networkConfig := defaultNetworkSettings(&project, service, 1, nil, true)
+		networkMode, networkConfig := defaultNetworkSettings(&project, service, 1, nil, true, "1.43")
 		assert.Equal(t, string(networkMode), "none")
 		assert.Check(t, cmp.Nil(networkConfig))
 	})
@@ -258,7 +270,7 @@ func TestDefaultNetworkSettings(t *testing.T) {
 			}),
 		}
 
-		networkMode, networkConfig := defaultNetworkSettings(&project, service, 1, nil, true)
+		networkMode, networkConfig := defaultNetworkSettings(&project, service, 1, nil, true, "1.43")
 		assert.Equal(t, string(networkMode), "host")
 		assert.Check(t, cmp.Nil(networkConfig))
 	})

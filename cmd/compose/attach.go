@@ -43,7 +43,7 @@ func attachCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service
 	}
 	runCmd := &cobra.Command{
 		Use:   "attach [OPTIONS] SERVICE",
-		Short: "Attach local standard input, output, and error streams to a service's running container.",
+		Short: "Attach local standard input, output, and error streams to a service's running container",
 		Args:  cobra.MinimumNArgs(1),
 		PreRunE: Adapt(func(ctx context.Context, args []string) error {
 			opts.service = args[0]
@@ -64,7 +64,7 @@ func attachCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service
 }
 
 func runAttach(ctx context.Context, dockerCli command.Cli, backend api.Service, opts attachOpts) error {
-	projectName, err := opts.toProjectName(dockerCli)
+	projectName, err := opts.toProjectName(ctx, dockerCli)
 	if err != nil {
 		return err
 	}

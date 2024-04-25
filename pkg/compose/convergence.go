@@ -34,6 +34,7 @@ import (
 	"github.com/docker/compose/v2/internal/tracing"
 	moby "github.com/docker/docker/api/types"
 	containerType "github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/versions"
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
@@ -126,6 +127,24 @@ func (c *convergence) ensureService(ctx context.Context, project *types.Project,
 	}
 
 	sort.Slice(containers, func(i, j int) bool {
+		// select obsolete containers first, so they get removed as we scale down
+		if obsolete, _ := mustRecreate(service, containers[i], recreate); obsolete {
+			// i is obsolete, so must be first in the list
+			return true
+		}
+		if obsolete, _ := mustRecreate(service, containers[j], recreate); obsolete {
+			// j is obsolete, so must be first in the list
+			return false
+		}
+
+		// For up-to-date containers, sort by container number to preserve low-values in container numbers
+		ni, erri := strconv.Atoi(containers[i].Labels[api.ContainerNumberLabel])
+		nj, errj := strconv.Atoi(containers[j].Labels[api.ContainerNumberLabel])
+		if erri == nil && errj == nil {
+			return ni < nj
+		}
+
+		// If we don't get a container number (?) just sort by creation date
 		return containers[i].Created < containers[j].Created
 	})
 	for i, container := range containers {
@@ -600,19 +619,27 @@ func (s *composeService) createMobyContainer(ctx context.Context,
 		},
 	}
 
-	// the highest-priority network is the primary and is included in the ContainerCreate API
-	// call via container.NetworkMode & network.NetworkingConfig
-	// any remaining networks are connected one-by-one here after creation (but before start)
-	serviceNetworks := service.NetworksByPriority()
-	for _, networkKey := range serviceNetworks {
-		mobyNetworkName := project.Networks[networkKey].Name
-		if string(cfgs.Host.NetworkMode) == mobyNetworkName {
-			// primary network already configured as part of ContainerCreate
-			continue
-		}
-		epSettings := createEndpointSettings(project, service, number, networkKey, cfgs.Links, opts.UseNetworkAliases)
-		if err := s.apiClient().NetworkConnect(ctx, mobyNetworkName, created.ID, epSettings); err != nil {
-			return created, err
+	apiVersion, err := s.RuntimeVersion(ctx)
+	if err != nil {
+		return created, err
+	}
+	// Starting API version 1.44, the ContainerCreate API call takes multiple networks
+	// so we include all the configurations there and can skip the one-by-one calls here
+	if versions.LessThan(apiVersion, "1.44") {
+		// the highest-priority network is the primary and is included in the ContainerCreate API
+		// call via container.NetworkMode & network.NetworkingConfig
+		// any remaining networks are connected one-by-one here after creation (but before start)
+		serviceNetworks := service.NetworksByPriority()
+		for _, networkKey := range serviceNetworks {
+			mobyNetworkName := project.Networks[networkKey].Name
+			if string(cfgs.Host.NetworkMode) == mobyNetworkName {
+				// primary network already configured as part of ContainerCreate
+				continue
+			}
+			epSettings := createEndpointSettings(project, service, number, networkKey, cfgs.Links, opts.UseNetworkAliases)
+			if err := s.apiClient().NetworkConnect(ctx, mobyNetworkName, created.ID, epSettings); err != nil {
+				return created, err
+			}
 		}
 	}
 
@@ -730,7 +757,7 @@ func (s *composeService) isServiceCompleted(ctx context.Context, containers Cont
 	return false, 0, nil
 }
 
-func (s *composeService) startService(ctx context.Context, project *types.Project, service types.ServiceConfig, containers Containers, wait bool) error {
+func (s *composeService) startService(ctx context.Context, project *types.Project, service types.ServiceConfig, containers Containers) error {
 	if service.Deploy != nil && service.Deploy.Replicas != nil && *service.Deploy.Replicas == 0 {
 		return nil
 	}
@@ -758,26 +785,9 @@ func (s *composeService) startService(ctx context.Context, project *types.Projec
 		if err != nil {
 			return err
 		}
-		status := progress.Done
-		if wait || dependencyWaiting(project, service.Name) {
-			status = progress.Working
-		}
-		w.Event(progress.NewEvent(eventName, status, "Started"))
+		w.Event(progress.StartedEvent(eventName))
 	}
 	return nil
-}
-
-func dependencyWaiting(project *types.Project, name string) bool {
-	for _, service := range project.Services {
-		depends, ok := service.DependsOn[name]
-		if !ok {
-			continue
-		}
-		if depends.Condition == types.ServiceConditionHealthy {
-			return true
-		}
-	}
-	return false
 }
 
 func mergeLabels(ls ...types.Labels) types.Labels {

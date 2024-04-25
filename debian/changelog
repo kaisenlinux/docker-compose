@@ -1,3 +1,10 @@
+docker-compose (2.27.0-1kaisen) kaisen-packages; urgency=medium
+
+  * Import the 2.27.0 version
+  * Update the quilt patch
+
+ -- Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>  Thu, 25 Apr 2024 19:26:51 +0200
+
 docker-compose (2.24.5-1kaisen) kaisen-packages; urgency=medium
 
   * Import the 2.24.5 version

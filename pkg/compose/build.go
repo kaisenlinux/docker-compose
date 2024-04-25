@@ -127,6 +127,9 @@ func (s *composeService) build(ctx context.Context, project *types.Project, opti
 		progressCtx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
+		if options.Quiet {
+			options.Progress = progress.ModeQuiet
+		}
 		w, err = xprogress.NewPrinter(progressCtx, os.Stdout, progressui.DisplayMode(options.Progress),
 			xprogress.WithDesc(
 				fmt.Sprintf("building with %q instance using %s driver", b.Name, b.Driver),
@@ -170,7 +173,7 @@ func (s *composeService) build(ctx context.Context, project *types.Project, opti
 		}
 
 		if options.Memory != 0 {
-			fmt.Fprintln(s.stderr(), "WARNING: --memory is not supported by BuildKit and will be ignored.")
+			fmt.Fprintln(s.stderr(), "WARNING: --memory is not supported by BuildKit and will be ignored")
 		}
 
 		buildOptions, err := s.toBuildOptions(project, service, options)
@@ -221,7 +224,7 @@ func (s *composeService) ensureImagesExists(ctx context.Context, project *types.
 		return err
 	}
 
-	err = tracing.SpanWrapFunc("project/pull", tracing.ProjectOptions(project),
+	err = tracing.SpanWrapFunc("project/pull", tracing.ProjectOptions(ctx, project),
 		func(ctx context.Context) error {
 			return s.pullRequiredImages(ctx, project, images, quietPull)
 		},
@@ -231,7 +234,7 @@ func (s *composeService) ensureImagesExists(ctx context.Context, project *types.
 	}
 
 	if buildOpts != nil {
-		err = tracing.SpanWrapFunc("project/build", tracing.ProjectOptions(project),
+		err = tracing.SpanWrapFunc("project/build", tracing.ProjectOptions(ctx, project),
 			func(ctx context.Context) error {
 				builtImages, err := s.build(ctx, project, *buildOpts, images)
 				if err != nil {
@@ -385,7 +388,11 @@ func (s *composeService) toBuildOptions(project *types.Project, service types.Se
 	if len(service.Build.Tags) > 0 {
 		tags = append(tags, service.Build.Tags...)
 	}
-	var allow []entitlements.Entitlement
+
+	allow, err := buildflags.ParseEntitlements(service.Build.Entitlements)
+	if err != nil {
+		return build.Options{}, err
+	}
 	if service.Build.Privileged {
 		allow = append(allow, entitlements.EntitlementSecurityInsecure)
 	}

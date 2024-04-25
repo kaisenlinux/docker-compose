@@ -50,13 +50,13 @@ func restartCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Servic
 	}
 	flags := restartCmd.Flags()
 	flags.IntVarP(&opts.timeout, "timeout", "t", 0, "Specify a shutdown timeout in seconds")
-	flags.BoolVar(&opts.noDeps, "no-deps", false, "Don't restart dependent services.")
+	flags.BoolVar(&opts.noDeps, "no-deps", false, "Don't restart dependent services")
 
 	return restartCmd
 }
 
 func runRestart(ctx context.Context, dockerCli command.Cli, backend api.Service, opts restartOptions, services []string) error {
-	project, name, err := opts.projectOrName(dockerCli)
+	project, name, err := opts.projectOrName(ctx, dockerCli)
 	if err != nil {
 		return err
 	}
