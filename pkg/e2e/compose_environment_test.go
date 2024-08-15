@@ -117,7 +117,8 @@ func TestEnvPriority(t *testing.T) {
 			"run", "--rm", "-e", "WHEREAMI", "env-compose-priority")
 		cmd.Env = append(cmd.Env, "COMPOSE_ENV_FILES=./fixtures/environment/env-priority/.env.override.with.default")
 		res := icmd.RunCmd(cmd)
-		assert.Equal(t, strings.TrimSpace(res.Stdout()), "EnvFileDefaultValue")
+		stdout := res.Stdout()
+		assert.Equal(t, strings.TrimSpace(stdout), "EnvFileDefaultValue")
 	})
 
 	// No Compose file and env variable pass to the run command
@@ -219,5 +220,26 @@ func TestCommentsInEnvFile(t *testing.T) {
 		res.Assert(t, icmd.Expected{Out: `NO_COMMENT=1234#5`})
 
 		c.RunDockerComposeCmd(t, "--project-name", "env-file-comments", "down", "--rmi", "all")
+	})
+}
+
+func TestUnsetEnv(t *testing.T) {
+	c := NewParallelCLI(t)
+	t.Cleanup(func() {
+		c.RunDockerComposeCmd(t, "--project-name", "empty-variable", "down", "--rmi", "all")
+	})
+
+	t.Run("override env variable", func(t *testing.T) {
+		c.RunDockerComposeCmd(t, "-f", "./fixtures/environment/empty-variable/compose.yaml", "build")
+
+		res := c.RunDockerComposeCmd(t, "-f", "./fixtures/environment/empty-variable/compose.yaml",
+			"run", "-e", "EMPTY=hello", "--rm", "empty-variable")
+		res.Assert(t, icmd.Expected{Out: `=hello=`})
+	})
+
+	t.Run("unset env variable", func(t *testing.T) {
+		res := c.RunDockerComposeCmd(t, "-f", "./fixtures/environment/empty-variable/compose.yaml",
+			"run", "--rm", "empty-variable")
+		res.Assert(t, icmd.Expected{Out: `==`})
 	})
 }

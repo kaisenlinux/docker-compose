@@ -22,11 +22,14 @@ import (
 	"time"
 
 	"github.com/compose-spec/compose-go/v2/types"
+	"github.com/docker/cli/cli/streams"
 	"github.com/docker/compose/v2/internal/sync"
 	"github.com/docker/compose/v2/pkg/api"
 	"github.com/docker/compose/v2/pkg/mocks"
 	"github.com/docker/compose/v2/pkg/watch"
 	moby "github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/image"
 	"github.com/jonboulle/clockwork"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
@@ -113,18 +116,32 @@ func (s stdLogger) Register(container string) {
 func TestWatch_Sync(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	cli := mocks.NewMockCli(mockCtrl)
-	cli.EXPECT().Err().Return(os.Stderr).AnyTimes()
+	cli.EXPECT().Err().Return(streams.NewOut(os.Stderr)).AnyTimes()
 	cli.EXPECT().BuildKitEnabled().Return(true, nil)
 	apiClient := mocks.NewMockAPIClient(mockCtrl)
 	apiClient.EXPECT().ContainerList(gomock.Any(), gomock.Any()).Return([]moby.Container{
 		testContainer("test", "123", false),
 	}, nil).AnyTimes()
+	// we expect the image to be pruned
+	apiClient.EXPECT().ImageList(gomock.Any(), image.ListOptions{
+		Filters: filters.NewArgs(
+			filters.Arg("dangling", "true"),
+			filters.Arg("label", api.ProjectLabel+"=myProjectName"),
+		),
+	}).Return([]image.Summary{
+		{ID: "123"},
+		{ID: "456"},
+	}, nil).Times(1)
+	apiClient.EXPECT().ImageRemove(gomock.Any(), "123", image.RemoveOptions{}).Times(1)
+	apiClient.EXPECT().ImageRemove(gomock.Any(), "456", image.RemoveOptions{}).Times(1)
+	//
 	cli.EXPECT().Client().Return(apiClient).AnyTimes()
 
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	t.Cleanup(cancelFunc)
 
 	proj := types.Project{
+		Name: "myProjectName",
 		Services: types.Services{
 			"test": {
 				Name: "test",
@@ -144,9 +161,10 @@ func TestWatch_Sync(t *testing.T) {
 			dockerCli: cli,
 			clock:     clock,
 		}
-		err := service.watch(ctx, &proj, "test", api.WatchOptions{
+		err := service.watchEvents(ctx, &proj, "test", api.WatchOptions{
 			Build: &api.BuildOptions{},
 			LogTo: stdLogger{},
+			Prune: true,
 		}, watcher, syncer, []types.Trigger{
 			{
 				Path:   "/sync",

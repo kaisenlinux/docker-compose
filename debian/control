@@ -4,17 +4,17 @@ Priority: optional
 Maintainer: Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>
 Build-Depends:
  debhelper-compat (= 13),
- golang-go (>= 1.20),
+ golang-go (>= 1.21),
  dh-golang,
  docker-buildx,
-Standards-Version: 4.6.2
+Standards-Version: 4.7.2
 Homepage: https://github.com/docker/compose
 Vcs-Browser: https://gitlab.com/kaisenlinux/packages/docker-compose
 Vcs-Git: https://gitlab.com/kaisenlinux/packages/docker-compose.git
 XS-Go-Import-Path: github.com/docker/compose
 
 Package: docker-compose
-Architecture: amd64 i386 arm64
+Architecture: amd64 arm64
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},

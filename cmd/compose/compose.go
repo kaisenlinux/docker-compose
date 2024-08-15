@@ -18,6 +18,7 @@ package compose
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -111,6 +112,9 @@ func AdaptCmd(fn CobraCommand) func(cmd *cobra.Command, args []string) error {
 				Status:     err.Error(),
 			}
 		}
+		if ui.Mode == ui.ModeJSON {
+			err = makeJSONError(err)
+		}
 		return err
 	}
 }
@@ -167,17 +171,56 @@ func (o *ProjectOptions) WithServices(dockerCli command.Cli, fn ProjectServicesF
 	})
 }
 
+type jsonErrorData struct {
+	Error   bool   `json:"error,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+func errorAsJSON(message string) string {
+	errorMessage := &jsonErrorData{
+		Error:   true,
+		Message: message,
+	}
+	marshal, err := json.Marshal(errorMessage)
+	if err == nil {
+		return string(marshal)
+	} else {
+		return message
+	}
+}
+
+func makeJSONError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var statusErr dockercli.StatusError
+	if errors.As(err, &statusErr) {
+		return dockercli.StatusError{
+			StatusCode: statusErr.StatusCode,
+			Status:     errorAsJSON(statusErr.Status),
+		}
+	}
+	return fmt.Errorf("%s", errorAsJSON(err.Error()))
+}
+
 func (o *ProjectOptions) addProjectFlags(f *pflag.FlagSet) {
 	f.StringArrayVar(&o.Profiles, "profile", []string{}, "Specify a profile to enable")
 	f.StringVarP(&o.ProjectName, "project-name", "p", "", "Project name")
 	f.StringArrayVarP(&o.ConfigPaths, "file", "f", []string{}, "Compose configuration files")
-	f.StringArrayVar(&o.EnvFiles, "env-file", nil, "Specify an alternate environment file")
+	f.StringArrayVar(&o.EnvFiles, "env-file", defaultStringArrayVar(ComposeEnvFiles), "Specify an alternate environment file")
 	f.StringVar(&o.ProjectDir, "project-directory", "", "Specify an alternate working directory\n(default: the path of the, first specified, Compose file)")
 	f.StringVar(&o.WorkDir, "workdir", "", "DEPRECATED! USE --project-directory INSTEAD.\nSpecify an alternate working directory\n(default: the path of the, first specified, Compose file)")
 	f.BoolVar(&o.Compatibility, "compatibility", false, "Run compose in backward compatibility mode")
 	f.StringVar(&o.Progress, "progress", string(buildkit.AutoMode), fmt.Sprintf(`Set type of progress output (%s)`, strings.Join(printerModes, ", ")))
 	f.BoolVar(&o.All, "all-resources", false, "Include all resources, even those not used by services")
 	_ = f.MarkHidden("workdir")
+}
+
+// get default value for a command line flag that is set by a coma-separated value in environment variable
+func defaultStringArrayVar(env string) []string {
+	return strings.FieldsFunc(os.Getenv(env), func(c rune) bool {
+		return c == ','
+	})
 }
 
 func (o *ProjectOptions) projectOrName(ctx context.Context, dockerCli command.Cli, services ...string) (*types.Project, string, error) {
@@ -301,11 +344,14 @@ func (o *ProjectOptions) ToProject(ctx context.Context, dockerCli command.Cli, s
 		project.Services[name] = s
 	}
 
+	project, err = project.WithSelectedServices(services)
+	if err != nil {
+		return nil, tracing.Metrics{}, err
+	}
+
 	if !o.All {
 		project = project.WithoutUnnecessaryResources()
 	}
-
-	project, err = project.WithSelectedServices(services)
 	return project, metrics, err
 }
 
@@ -322,11 +368,20 @@ func (o *ProjectOptions) toProjectOptions(po ...cli.ProjectOptionsFn) (*cli.Proj
 	return cli.NewProjectOptions(o.ConfigPaths,
 		append(po,
 			cli.WithWorkingDirectory(o.ProjectDir),
+			// First apply os.Environment, always win
 			cli.WithOsEnv,
+			// Load PWD/.env if present and no explicit --env-file has been set
+			cli.WithEnvFiles(o.EnvFiles...),
+			// read dot env file to populate project environment
+			cli.WithDotEnv,
+			// get compose file path set by COMPOSE_FILE
 			cli.WithConfigFileEnv,
+			// if none was selected, get default compose.yaml file from current dir or parent folder
 			cli.WithDefaultConfigPath,
+			// .. and then, a project directory != PWD maybe has been set so let's load .env file
 			cli.WithEnvFiles(o.EnvFiles...),
 			cli.WithDotEnv,
+			// eventually COMPOSE_PROFILES should have been set
 			cli.WithDefaultProfiles(o.Profiles...),
 			cli.WithName(o.ProjectName))...)
 }
@@ -382,16 +437,8 @@ func RootCommand(dockerCli command.Cli, backend Backend) *cobra.Command { //noli
 		},
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-
-			// (1) process env vars
-			err := setEnvWithDotEnv(&opts)
-			if err != nil {
-				return err
-			}
 			parent := cmd.Root()
 
-			// (2) call parent pre-run
-			// TODO(milas): this seems incorrect, remove or document
 			if parent != nil {
 				parentPrerun := parent.PersistentPreRunE
 				if parentPrerun != nil {
@@ -402,9 +449,13 @@ func RootCommand(dockerCli command.Cli, backend Backend) *cobra.Command { //noli
 				}
 			}
 
-			// (3) set up display/output
 			if verbose {
 				logrus.SetLevel(logrus.TraceLevel)
+			}
+
+			err := setEnvWithDotEnv(opts)
+			if err != nil {
+				return err
 			}
 			if noAnsi {
 				if ansi != "auto" {
@@ -448,6 +499,9 @@ func RootCommand(dockerCli command.Cli, backend Backend) *cobra.Command { //noli
 				ui.Mode = ui.ModePlain
 			case ui.ModeQuiet, "none":
 				ui.Mode = ui.ModeQuiet
+			case ui.ModeJSON:
+				ui.Mode = ui.ModeJSON
+				logrus.SetFormatter(&logrus.JSONFormatter{})
 			default:
 				return fmt.Errorf("unsupported --progress value %q", opts.Progress)
 			}
@@ -462,7 +516,7 @@ func RootCommand(dockerCli command.Cli, backend Backend) *cobra.Command { //noli
 			}
 			for i, file := range opts.EnvFiles {
 				if !filepath.IsAbs(file) {
-					file, err = filepath.Abs(file)
+					file, err := filepath.Abs(file)
 					if err != nil {
 						return err
 					}
@@ -493,7 +547,7 @@ func RootCommand(dockerCli command.Cli, backend Backend) *cobra.Command { //noli
 				backend.MaxConcurrency(parallel)
 			}
 
-			// (5) dry run detection
+			// dry run detection
 			ctx, err = backend.DryRunMode(ctx, dryRun)
 			if err != nil {
 				return err
@@ -594,35 +648,35 @@ func RootCommand(dockerCli command.Cli, backend Backend) *cobra.Command { //noli
 	return c
 }
 
-func setEnvWithDotEnv(prjOpts *ProjectOptions) error {
-	if len(prjOpts.EnvFiles) == 0 {
-		if envFiles := os.Getenv(ComposeEnvFiles); envFiles != "" {
-			prjOpts.EnvFiles = strings.Split(envFiles, ",")
-		}
-	}
-	options, err := prjOpts.toProjectOptions()
+func setEnvWithDotEnv(opts ProjectOptions) error {
+	options, err := cli.NewProjectOptions(opts.ConfigPaths,
+		cli.WithWorkingDirectory(opts.ProjectDir),
+		cli.WithOsEnv,
+		cli.WithEnvFiles(opts.EnvFiles...),
+		cli.WithDotEnv,
+	)
 	if err != nil {
-		return compose.WrapComposeError(err)
+		return nil
 	}
-
 	envFromFile, err := dotenv.GetEnvFromFile(composegoutils.GetAsEqualsMap(os.Environ()), options.EnvFiles)
 	if err != nil {
-		return err
+		return nil
 	}
 	for k, v := range envFromFile {
-		if _, ok := os.LookupEnv(k); !ok { // Precedence to OS Env
-			if err := os.Setenv(k, v); err != nil {
-				return err
+		if _, ok := os.LookupEnv(k); !ok {
+			if err = os.Setenv(k, v); err != nil {
+				return nil
 			}
 		}
 	}
-	return nil
+	return err
 }
 
 var printerModes = []string{
 	ui.ModeAuto,
 	ui.ModeTTY,
 	ui.ModePlain,
+	ui.ModeJSON,
 	ui.ModeQuiet,
 }
 

@@ -15,7 +15,7 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-ARG GO_VERSION=1.21.9
+ARG GO_VERSION=1.21.11
 ARG XX_VERSION=1.2.1
 ARG GOLANGCI_LINT_VERSION=v1.55.2
 ARG ADDLICENSE_VERSION=v1.0.0
@@ -101,7 +101,6 @@ RUN --mount=type=bind,target=. \
 FROM build-base AS test
 ARG CGO_ENABLED=0
 ARG BUILD_TAGS
-ENV COMPOSE_MENU=FALSE
 RUN --mount=type=bind,target=. \
     --mount=type=cache,target=/root/.cache \
     --mount=type=cache,target=/go/pkg/mod \
