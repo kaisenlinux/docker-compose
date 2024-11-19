@@ -32,6 +32,8 @@ func ServiceHash(o types.ServiceConfig) (string, error) {
 	if o.Deploy != nil {
 		o.Deploy.Replicas = nil
 	}
+	o.DependsOn = nil
+	o.Profiles = nil
 
 	bytes, err := json.Marshal(o)
 	if err != nil {

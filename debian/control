@@ -4,7 +4,7 @@ Priority: optional
 Maintainer: Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>
 Build-Depends:
  debhelper-compat (= 13),
- golang-go (>= 1.21),
+ golang-go (>= 1.22),
  dh-golang,
  docker-buildx,
 Standards-Version: 4.7.2

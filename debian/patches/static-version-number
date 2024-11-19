@@ -7,7 +7,7 @@ Author: Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>
  
  PKG := github.com/docker/compose/v2
 -VERSION ?= $(shell git describe --match 'v[0-9]*' --dirty='.m' --always --tags)
-+VERSION ?= 2.29.1
++VERSION ?= 2.30.3
  
  GO_LDFLAGS ?= -w -X ${PKG}/internal.Version=${VERSION}
  GO_BUILDTAGS ?= e2e
