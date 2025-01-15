@@ -18,6 +18,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,23 +44,32 @@ func TestDebounceBatching(t *testing.T) {
 	ctx, stop := context.WithCancel(context.Background())
 	t.Cleanup(stop)
 
+	trigger := types.Trigger{
+		Path: "/",
+	}
+	matcher := watch.EmptyMatcher{}
 	eventBatchCh := batchDebounceEvents(ctx, clock, quietPeriod, ch)
 	for i := 0; i < 100; i++ {
-		var action types.WatchAction = "a"
+		path := "/a"
 		if i%2 == 0 {
-			action = "b"
+			path = "/b"
 		}
-		ch <- fileEvent{Action: action}
+
+		event := maybeFileEvent(trigger, path, matcher)
+		require.NotNil(t, event)
+		ch <- *event
 	}
 	// we sent 100 events + the debouncer
 	clock.BlockUntil(101)
 	clock.Advance(quietPeriod)
 	select {
 	case batch := <-eventBatchCh:
-		require.ElementsMatch(t, batch, []fileEvent{
-			{Action: "a"},
-			{Action: "b"},
+		slices.SortFunc(batch, func(a, b fileEvent) int {
+			return strings.Compare(a.HostPath, b.HostPath)
 		})
+		assert.Equal(t, len(batch), 2)
+		assert.Equal(t, batch[0].HostPath, "/a")
+		assert.Equal(t, batch[1].HostPath, "/b")
 	case <-time.After(50 * time.Millisecond):
 		t.Fatal("timed out waiting for events")
 	}
@@ -110,14 +121,12 @@ func (s stdLogger) Status(container, msg string) {
 }
 
 func (s stdLogger) Register(container string) {
-
 }
 
 func TestWatch_Sync(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	cli := mocks.NewMockCli(mockCtrl)
 	cli.EXPECT().Err().Return(streams.NewOut(os.Stderr)).AnyTimes()
-	cli.EXPECT().BuildKitEnabled().Return(true, nil)
 	apiClient := mocks.NewMockAPIClient(mockCtrl)
 	apiClient.EXPECT().ContainerList(gomock.Any(), gomock.Any()).Return([]moby.Container{
 		testContainer("test", "123", false),

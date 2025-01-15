@@ -17,6 +17,7 @@
 package e2e
 
 import (
+	"bytes"
 	"crypto/rand"
 	"fmt"
 	"os"
@@ -34,7 +35,6 @@ import (
 )
 
 func TestWatch(t *testing.T) {
-
 	services := []string{"alpine", "busybox", "debian"}
 	for _, svcName := range services {
 		t.Run(svcName, func(t *testing.T) {
@@ -132,7 +132,6 @@ func TestRebuildOnDotEnvWithExternalNetwork(t *testing.T) {
 		}
 	})
 	testComplete.Store(true)
-
 }
 
 // NOTE: these tests all share a single Compose file but are safe to run
@@ -165,11 +164,7 @@ func doTest(t *testing.T, svcName string) {
 	cli := NewCLI(t, WithEnv(env...))
 
 	// important that --rmi is used to prune the images and ensure that watch builds on launch
-	cleanup := func() {
-		cli.RunDockerComposeCmd(t, "down", svcName, "--remove-orphans", "--volumes", "--rmi=local")
-	}
-	cleanup()
-	t.Cleanup(cleanup)
+	defer cli.cleanupWithDown(t, projName, "--rmi=local")
 
 	cmd := cli.NewDockerComposeCmd(t, "--verbose", "watch", svcName)
 	// stream output since watch runs in the background
@@ -292,4 +287,41 @@ func doTest(t *testing.T, svcName string) {
 	poll.WaitOn(t, checkFileContents("/app/config/file.config", "This is an updated config file"))
 
 	testComplete.Store(true)
+}
+
+func TestWatchExec(t *testing.T) {
+	c := NewCLI(t)
+	const projectName = "test_watch_exec"
+
+	defer c.cleanupWithDown(t, projectName)
+
+	tmpdir := t.TempDir()
+	composeFilePath := filepath.Join(tmpdir, "compose.yaml")
+	CopyFile(t, filepath.Join("fixtures", "watch", "exec.yaml"), composeFilePath)
+	cmd := c.NewDockerComposeCmd(t, "-p", projectName, "-f", composeFilePath, "up", "--watch")
+	buffer := bytes.NewBuffer(nil)
+	cmd.Stdout = buffer
+	watch := icmd.StartCmd(cmd)
+
+	poll.WaitOn(t, func(l poll.LogT) poll.Result {
+		out := buffer.String()
+		if strings.Contains(out, "64 bytes from") {
+			return poll.Success()
+		}
+		return poll.Continue("%v", watch.Stdout())
+	})
+
+	t.Logf("Create new file")
+
+	testFile := filepath.Join(tmpdir, "test")
+	require.NoError(t, os.WriteFile(testFile, []byte("test\n"), 0o600))
+
+	poll.WaitOn(t, func(l poll.LogT) poll.Result {
+		out := buffer.String()
+		if strings.Contains(out, "SUCCESS") {
+			return poll.Success()
+		}
+		return poll.Continue("%v", out)
+	})
+	c.RunDockerComposeCmdNoCheck(t, "-p", projectName, "kill", "-s", "9")
 }

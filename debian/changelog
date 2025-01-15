@@ -1,3 +1,11 @@
+docker-compose (2.32.3-1kaisen) kaisen-packages; urgency=medium
+
+  * Import the 2.32.3 version
+  * Bump the golang-go version required
+  * Update the quilt patch
+
+ -- Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>  Wed, 15 Jan 2025 15:30:29 +0200
+
 docker-compose (2.30.3-1kaisen) kaisen-packages; urgency=medium
 
   * Import the 2.30.3 version

@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/containerd/platforms"
@@ -38,7 +37,6 @@ import (
 	"github.com/docker/compose/v2/pkg/progress"
 	"github.com/docker/compose/v2/pkg/utils"
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/builder/remotecontext/urlutil"
 	bclient "github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/session/auth/authprovider"
@@ -64,26 +62,16 @@ func (s *composeService) Build(ctx context.Context, project *types.Project, opti
 	}, s.stdinfo(), "Building")
 }
 
-type serviceToBuild struct {
-	name    string
-	service types.ServiceConfig
-}
-
 //nolint:gocyclo
 func (s *composeService) build(ctx context.Context, project *types.Project, options api.BuildOptions, localImages map[string]string) (map[string]string, error) {
-	buildkitEnabled, err := s.dockerCli.BuildKitEnabled()
-	if err != nil {
-		return nil, err
-	}
-
 	imageIDs := map[string]string{}
-	serviceToBeBuild := map[string]serviceToBuild{}
+	serviceToBuild := types.Services{}
 
 	var policy types.DependencyOption = types.IgnoreDependencies
 	if options.Deps {
 		policy = types.IncludeDependencies
 	}
-	err = project.ForEachService(options.Services, func(serviceName string, service *types.ServiceConfig) error {
+	err := project.ForEachService(options.Services, func(serviceName string, service *types.ServiceConfig) error {
 		if service.Build == nil {
 			return nil
 		}
@@ -92,14 +80,26 @@ func (s *composeService) build(ctx context.Context, project *types.Project, opti
 		if localImagePresent && service.PullPolicy != types.PullPolicyBuild {
 			return nil
 		}
-		serviceToBeBuild[serviceName] = serviceToBuild{name: serviceName, service: *service}
+		serviceToBuild[serviceName] = *service
 		return nil
 	}, policy)
-	if err != nil || len(serviceToBeBuild) == 0 {
+	if err != nil || len(serviceToBuild) == 0 {
 		return imageIDs, err
 	}
 
+	bake, err := buildWithBake(s.dockerCli)
+	if err != nil {
+		return nil, err
+	}
+	if bake {
+		return s.doBuildBake(ctx, project, serviceToBuild, options)
+	}
+
 	// Initialize buildkit nodes
+	buildkitEnabled, err := s.dockerCli.BuildKitEnabled()
+	if err != nil {
+		return nil, err
+	}
 	var (
 		b     *builder.Builder
 		nodes []builder.Node
@@ -134,7 +134,6 @@ func (s *composeService) build(ctx context.Context, project *types.Project, opti
 				fmt.Sprintf("building with %q instance using %s driver", b.Name, b.Driver),
 				fmt.Sprintf("%s:%s", b.Driver, b.Name),
 			))
-
 		if err != nil {
 			return nil, err
 		}
@@ -151,18 +150,22 @@ func (s *composeService) build(ctx context.Context, project *types.Project, opti
 		}
 		return -1
 	}
+
+	cw := progress.ContextWriter(ctx)
 	err = InDependencyOrder(ctx, project, func(ctx context.Context, name string) error {
-		serviceToBuild, ok := serviceToBeBuild[name]
+		service, ok := serviceToBuild[name]
 		if !ok {
 			return nil
 		}
-		service := serviceToBuild.service
+		serviceName := fmt.Sprintf("Service %s", name)
 
 		if !buildkitEnabled {
+			cw.Event(progress.BuildingEvent(serviceName))
 			id, err := s.doBuildClassic(ctx, project, service, options)
 			if err != nil {
 				return err
 			}
+			cw.Event(progress.BuiltEvent(serviceName))
 			builtDigests[getServiceIndex(name)] = id
 
 			if options.Push {
@@ -204,8 +207,10 @@ func (s *composeService) build(ctx context.Context, project *types.Project, opti
 
 	for i, imageDigest := range builtDigests {
 		if imageDigest != "" {
-			imageRef := api.GetImageNameOrDefault(project.Services[names[i]], project.Name)
+			service := project.Services[names[i]]
+			imageRef := api.GetImageNameOrDefault(service, project.Name)
 			imageIDs[imageRef] = imageDigest
+			cw.Event(progress.BuiltEvent(names[i]))
 		}
 	}
 	return imageIDs, err
@@ -274,7 +279,7 @@ func (s *composeService) getLocalImagesDigests(ctx context.Context, project *typ
 			imageNames = append(imageNames, imgName)
 		}
 	}
-	imgs, err := s.getImages(ctx, imageNames)
+	imgs, err := s.getImageSummaries(ctx, imageNames)
 	if err != nil {
 		return nil, err
 	}
@@ -327,12 +332,7 @@ func (s *composeService) getLocalImagesDigests(ctx context.Context, project *typ
 //
 // Finally, standard proxy variables based on the Docker client configuration are added, but will not overwrite
 // any values if already present.
-func resolveAndMergeBuildArgs(
-	dockerCli command.Cli,
-	project *types.Project,
-	service types.ServiceConfig,
-	opts api.BuildOptions,
-) types.MappingWithEquals {
+func resolveAndMergeBuildArgs(dockerCli command.Cli, project *types.Project, service types.ServiceConfig, opts api.BuildOptions) types.MappingWithEquals {
 	result := make(types.MappingWithEquals).
 		OverrideBy(service.Build.Args).
 		OverrideBy(opts.Args).
@@ -470,16 +470,6 @@ func flatten(in types.MappingWithEquals) types.Mapping {
 		out[k] = *v
 	}
 	return out
-}
-
-func dockerFilePath(ctxName string, dockerfile string) string {
-	if dockerfile == "" {
-		return ""
-	}
-	if urlutil.IsGitURL(ctxName) || filepath.IsAbs(dockerfile) {
-		return dockerfile
-	}
-	return filepath.Join(ctxName, dockerfile)
 }
 
 func sshAgentProvider(sshKeys types.SSHConfig) (session.Attachable, error) {

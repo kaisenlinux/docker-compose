@@ -34,6 +34,7 @@ import (
 	pathutil "github.com/docker/compose/v2/internal/paths"
 	"github.com/docker/compose/v2/pkg/api"
 	"github.com/docker/compose/v2/pkg/progress"
+	"github.com/docker/compose/v2/pkg/prompt"
 	"github.com/docker/compose/v2/pkg/utils"
 	moby "github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/blkiodev"
@@ -80,12 +81,6 @@ func (s *composeService) create(ctx context.Context, project *types.Project, opt
 		return err
 	}
 
-	var observedState Containers
-	observedState, err = s.getContainers(ctx, project.Name, oneOffInclude, true)
-	if err != nil {
-		return err
-	}
-
 	err = s.ensureImagesExists(ctx, project, options.Build, options.QuietPull)
 	if err != nil {
 		return err
@@ -93,14 +88,21 @@ func (s *composeService) create(ctx context.Context, project *types.Project, opt
 
 	prepareNetworks(project)
 
-	if err := s.ensureNetworks(ctx, project.Networks); err != nil {
+	networks, err := s.ensureNetworks(ctx, project)
+	if err != nil {
 		return err
 	}
 
-	if err := s.ensureProjectVolumes(ctx, project); err != nil {
+	volumes, err := s.ensureProjectVolumes(ctx, project, options.AssumeYes)
+	if err != nil {
 		return err
 	}
 
+	var observedState Containers
+	observedState, err = s.getContainers(ctx, project.Name, oneOffInclude, true)
+	if err != nil {
+		return err
+	}
 	orphans := observedState.filter(isOrphaned(project))
 	if len(orphans) > 0 && !options.IgnoreOrphans {
 		if options.RemoveOrphans {
@@ -115,38 +117,43 @@ func (s *composeService) create(ctx context.Context, project *types.Project, opt
 				"--remove-orphans flag to clean it up.", orphans.names())
 		}
 	}
-	return newConvergence(options.Services, observedState, s).apply(ctx, project, options)
+	return newConvergence(options.Services, observedState, networks, volumes, s).apply(ctx, project, options)
 }
 
 func prepareNetworks(project *types.Project) {
 	for k, nw := range project.Networks {
-		nw.Labels = nw.Labels.Add(api.NetworkLabel, k)
-		nw.Labels = nw.Labels.Add(api.ProjectLabel, project.Name)
-		nw.Labels = nw.Labels.Add(api.VersionLabel, api.ComposeVersion)
+		nw.CustomLabels = nw.CustomLabels.
+			Add(api.NetworkLabel, k).
+			Add(api.ProjectLabel, project.Name).
+			Add(api.VersionLabel, api.ComposeVersion)
 		project.Networks[k] = nw
 	}
 }
 
-func (s *composeService) ensureNetworks(ctx context.Context, networks types.Networks) error {
-	for i, nw := range networks {
-		err := s.ensureNetwork(ctx, &nw)
+func (s *composeService) ensureNetworks(ctx context.Context, project *types.Project) (map[string]string, error) {
+	networks := map[string]string{}
+	for name, nw := range project.Networks {
+		id, err := s.ensureNetwork(ctx, project, name, &nw)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		networks[i] = nw
+		networks[name] = id
+		project.Networks[name] = nw
 	}
-	return nil
+	return networks, nil
 }
 
-func (s *composeService) ensureProjectVolumes(ctx context.Context, project *types.Project) error {
+func (s *composeService) ensureProjectVolumes(ctx context.Context, project *types.Project, assumeYes bool) (map[string]string, error) {
+	ids := map[string]string{}
 	for k, volume := range project.Volumes {
-		volume.Labels = volume.Labels.Add(api.VolumeLabel, k)
-		volume.Labels = volume.Labels.Add(api.ProjectLabel, project.Name)
-		volume.Labels = volume.Labels.Add(api.VersionLabel, api.ComposeVersion)
-		err := s.ensureVolume(ctx, volume, project.Name)
+		volume.CustomLabels = volume.CustomLabels.Add(api.VolumeLabel, k)
+		volume.CustomLabels = volume.CustomLabels.Add(api.ProjectLabel, project.Name)
+		volume.CustomLabels = volume.CustomLabels.Add(api.VersionLabel, api.ComposeVersion)
+		id, err := s.ensureVolume(ctx, k, volume, project, assumeYes)
 		if err != nil {
-			return err
+			return nil, err
 		}
+		ids[k] = id
 	}
 
 	err := func() error {
@@ -198,11 +205,10 @@ func (s *composeService) ensureProjectVolumes(ctx context.Context, project *type
 		}
 		return nil
 	}()
-
 	if err != nil {
 		progress.ContextWriter(ctx).TailMsgf("Failed to prepare Synchronized file shares: %v", err)
 	}
-	return nil
+	return ids, nil
 }
 
 func (s *composeService) getCreateConfigs(ctx context.Context,
@@ -252,7 +258,7 @@ func (s *composeService) getCreateConfigs(ctx context.Context,
 	if err != nil {
 		return createConfigs{}, err
 	}
-	var containerConfig = container.Config{
+	containerConfig := container.Config{
 		Hostname:        service.Hostname,
 		Domainname:      service.DomainName,
 		User:            service.User,
@@ -410,7 +416,7 @@ func (s *composeService) prepareContainerMACAddress(ctx context.Context, service
 			return "", fmt.Errorf("a MAC address is specified for multiple networks (%s), but this feature requires Docker Engine 1.44 or later (currently: %s)", strings.Join(withMacAddress, ", "), version)
 		}
 
-		if mainNw != nil {
+		if mainNw != nil && mainNw.MacAddress != "" {
 			macAddress = mainNw.MacAddress
 		}
 	}
@@ -418,11 +424,11 @@ func (s *composeService) prepareContainerMACAddress(ctx context.Context, service
 	return macAddress, nil
 }
 
-func getAliases(project *types.Project, service types.ServiceConfig, serviceIndex int, networkKey string, useNetworkAliases bool) []string {
+func getAliases(project *types.Project, service types.ServiceConfig, serviceIndex int, cfg *types.ServiceNetworkConfig, useNetworkAliases bool) []string {
 	aliases := []string{getContainerName(project.Name, service, serviceIndex)}
 	if useNetworkAliases {
 		aliases = append(aliases, service.Name)
-		if cfg := service.Networks[networkKey]; cfg != nil {
+		if cfg != nil {
 			aliases = append(aliases, cfg.Aliases...)
 		}
 	}
@@ -450,7 +456,7 @@ func createEndpointSettings(p *types.Project, service types.ServiceConfig, servi
 		driverOpts = config.DriverOpts
 	}
 	return &network.EndpointSettings{
-		Aliases:     getAliases(p, service, serviceIndex, networkKey, useNetworkAliases),
+		Aliases:     getAliases(p, service, serviceIndex, config, useNetworkAliases),
 		Links:       links,
 		IPAddress:   ipv4Address,
 		IPv6Gateway: ipv6Address,
@@ -542,23 +548,28 @@ func defaultNetworkSettings(
 		primaryNetworkKey = "default"
 	}
 	primaryNetworkMobyNetworkName := project.Networks[primaryNetworkKey].Name
-	endpointsConfig := map[string]*network.EndpointSettings{
-		primaryNetworkMobyNetworkName: createEndpointSettings(project, service, serviceIndex, primaryNetworkKey, links, useNetworkAliases),
-	}
+	primaryNetworkEndpoint := createEndpointSettings(project, service, serviceIndex, primaryNetworkKey, links, useNetworkAliases)
+	endpointsConfig := map[string]*network.EndpointSettings{}
 
 	// Starting from API version 1.44, the Engine will take several EndpointsConfigs
 	// so we can pass all the extra networks we want the container to be connected to
 	// in the network configuration instead of connecting the container to each extra
 	// network individually after creation.
-	if versions.GreaterThanOrEqualTo(version, "1.44") && len(service.Networks) > 1 {
-		serviceNetworks := service.NetworksByPriority()
-		for _, networkKey := range serviceNetworks[1:] {
-			mobyNetworkName := project.Networks[networkKey].Name
-			epSettings := createEndpointSettings(project, service, serviceIndex, networkKey, links, useNetworkAliases)
-			endpointsConfig[mobyNetworkName] = epSettings
+	if versions.GreaterThanOrEqualTo(version, "1.44") {
+		if len(service.Networks) > 1 {
+			serviceNetworks := service.NetworksByPriority()
+			for _, networkKey := range serviceNetworks[1:] {
+				mobyNetworkName := project.Networks[networkKey].Name
+				epSettings := createEndpointSettings(project, service, serviceIndex, networkKey, links, useNetworkAliases)
+				endpointsConfig[mobyNetworkName] = epSettings
+			}
+		}
+		if primaryNetworkEndpoint.MacAddress == "" {
+			primaryNetworkEndpoint.MacAddress = service.MacAddress
 		}
 	}
 
+	endpointsConfig[primaryNetworkMobyNetworkName] = primaryNetworkEndpoint
 	networkConfig := &network.NetworkingConfig{
 		EndpointsConfig: endpointsConfig,
 	}
@@ -880,7 +891,7 @@ func requireMountAPI(bind *types.ServiceVolumeBind) bool {
 }
 
 func buildContainerMountOptions(p types.Project, s types.ServiceConfig, img moby.ImageInspect, inherit *moby.Container) ([]mount.Mount, error) {
-	var mounts = map[string]mount.Mount{}
+	mounts := map[string]mount.Mount{}
 	if inherit != nil {
 		for _, m := range inherit.Mounts {
 			if m.Type == "tmpfs" {
@@ -966,7 +977,7 @@ func fillBindMounts(p types.Project, s types.ServiceConfig, m map[string]mount.M
 }
 
 func buildContainerConfigMounts(p types.Project, s types.ServiceConfig) ([]mount.Mount, error) {
-	var mounts = map[string]mount.Mount{}
+	mounts := map[string]mount.Mount{}
 
 	configsBaseDir := "/"
 	for _, config := range s.Configs {
@@ -1016,7 +1027,7 @@ func buildContainerConfigMounts(p types.Project, s types.ServiceConfig) ([]mount
 }
 
 func buildContainerSecretMounts(p types.Project, s types.ServiceConfig) ([]mount.Mount, error) {
-	var mounts = map[string]mount.Mount{}
+	mounts := map[string]mount.Mount{}
 
 	secretsDir := "/run/secrets/"
 	for _, secret := range s.Secrets {
@@ -1200,24 +1211,21 @@ func buildTmpfsOptions(tmpfs *types.ServiceVolumeTmpfs) *mount.TmpfsOptions {
 	}
 }
 
-func (s *composeService) ensureNetwork(ctx context.Context, n *types.NetworkConfig) error {
+func (s *composeService) ensureNetwork(ctx context.Context, project *types.Project, name string, n *types.NetworkConfig) (string, error) {
 	if n.External {
 		return s.resolveExternalNetwork(ctx, n)
 	}
 
-	err := s.resolveOrCreateNetwork(ctx, n)
+	id, err := s.resolveOrCreateNetwork(ctx, project, name, n)
 	if errdefs.IsConflict(err) {
 		// Maybe another execution of `docker compose up|run` created same network
 		// let's retry once
-		return s.resolveOrCreateNetwork(ctx, n)
+		return s.resolveOrCreateNetwork(ctx, project, name, n)
 	}
-	return err
+	return id, err
 }
 
-func (s *composeService) resolveOrCreateNetwork(ctx context.Context, n *types.NetworkConfig) error { //nolint:gocyclo
-	expectedNetworkLabel := n.Labels[api.NetworkLabel]
-	expectedProjectLabel := n.Labels[api.ProjectLabel]
-
+func (s *composeService) resolveOrCreateNetwork(ctx context.Context, project *types.Project, name string, n *types.NetworkConfig) (string, error) { //nolint:gocyclo
 	// First, try to find a unique network matching by name or ID
 	inspect, err := s.apiClient().NetworkInspect(ctx, n.Name, network.InspectOptions{})
 	if err == nil {
@@ -1228,20 +1236,33 @@ func (s *composeService) resolveOrCreateNetwork(ctx context.Context, n *types.Ne
 			if !ok {
 				logrus.Warnf("a network with name %s exists but was not created by compose.\n"+
 					"Set `external: true` to use an existing network", n.Name)
-			} else if p != expectedProjectLabel {
+			} else if p != project.Name {
 				logrus.Warnf("a network with name %s exists but was not created for project %q.\n"+
-					"Set `external: true` to use an existing network", n.Name, expectedProjectLabel)
+					"Set `external: true` to use an existing network", n.Name, project.Name)
 			}
-			if inspect.Labels[api.NetworkLabel] != expectedNetworkLabel {
-				return fmt.Errorf(
+			if inspect.Labels[api.NetworkLabel] != name {
+				return "", fmt.Errorf(
 					"network %s was found but has incorrect label %s set to %q (expected: %q)",
 					n.Name,
 					api.NetworkLabel,
 					inspect.Labels[api.NetworkLabel],
-					expectedNetworkLabel,
+					name,
 				)
 			}
-			return nil
+
+			hash := inspect.Labels[api.ConfigHashLabel]
+			expected, err := NetworkHash(n)
+			if err != nil {
+				return "", err
+			}
+			if hash == "" || hash == expected {
+				return inspect.ID, nil
+			}
+
+			err = s.removeDivergedNetwork(ctx, project, name, n)
+			if err != nil {
+				return "", err
+			}
 		}
 	}
 	// ignore other errors. Typically, an ambiguous request by name results in some generic `invalidParameter` error
@@ -1251,7 +1272,7 @@ func (s *composeService) resolveOrCreateNetwork(ctx context.Context, n *types.Ne
 		Filters: filters.NewArgs(filters.Arg("name", n.Name)),
 	})
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	// NetworkList Matches all or part of a network name, so we have to filter for a strict match
@@ -1260,9 +1281,9 @@ func (s *composeService) resolveOrCreateNetwork(ctx context.Context, n *types.Ne
 	})
 
 	for _, net := range networks {
-		if net.Labels[api.ProjectLabel] == expectedProjectLabel &&
-			net.Labels[api.NetworkLabel] == expectedNetworkLabel {
-			return nil
+		if net.Labels[api.ProjectLabel] == project.Name &&
+			net.Labels[api.NetworkLabel] == name {
+			return net.ID, nil
 		}
 	}
 
@@ -1272,7 +1293,7 @@ func (s *composeService) resolveOrCreateNetwork(ctx context.Context, n *types.Ne
 	if len(networks) > 0 {
 		logrus.Warnf("a network with name %s exists but was not created by compose.\n"+
 			"Set `external: true` to use an existing network", n.Name)
-		return nil
+		return networks[0].ID, nil
 	}
 
 	var ipam *network.IPAM
@@ -1291,8 +1312,13 @@ func (s *composeService) resolveOrCreateNetwork(ctx context.Context, n *types.Ne
 			Config: config,
 		}
 	}
+	hash, err := NetworkHash(n)
+	if err != nil {
+		return "", err
+	}
+	n.CustomLabels = n.CustomLabels.Add(api.ConfigHashLabel, hash)
 	createOpts := network.CreateOptions{
-		Labels:     n.Labels,
+		Labels:     mergeLabels(n.Labels, n.CustomLabels),
 		Driver:     n.Driver,
 		Options:    n.DriverOpts,
 		Internal:   n.Internal,
@@ -1322,16 +1348,42 @@ func (s *composeService) resolveOrCreateNetwork(ctx context.Context, n *types.Ne
 	w := progress.ContextWriter(ctx)
 	w.Event(progress.CreatingEvent(networkEventName))
 
-	_, err = s.apiClient().NetworkCreate(ctx, n.Name, createOpts)
+	resp, err := s.apiClient().NetworkCreate(ctx, n.Name, createOpts)
 	if err != nil {
 		w.Event(progress.ErrorEvent(networkEventName))
-		return fmt.Errorf("failed to create network %s: %w", n.Name, err)
+		return "", fmt.Errorf("failed to create network %s: %w", n.Name, err)
 	}
 	w.Event(progress.CreatedEvent(networkEventName))
-	return nil
+	return resp.ID, nil
 }
 
-func (s *composeService) resolveExternalNetwork(ctx context.Context, n *types.NetworkConfig) error {
+func (s *composeService) removeDivergedNetwork(ctx context.Context, project *types.Project, name string, n *types.NetworkConfig) error {
+	// Remove services attached to this network to force recreation
+	var services []string
+	for _, service := range project.Services.Filter(func(config types.ServiceConfig) bool {
+		_, ok := config.Networks[name]
+		return ok
+	}) {
+		services = append(services, service.Name)
+	}
+
+	// Stop containers so we can remove network
+	// They will be restarted (actually: recreated) with the updated network
+	err := s.stop(ctx, project.Name, api.StopOptions{
+		Services: services,
+		Project:  project,
+	})
+	if err != nil {
+		return err
+	}
+
+	err = s.apiClient().NetworkRemove(ctx, n.Name)
+	eventName := fmt.Sprintf("Network %s", n.Name)
+	progress.ContextWriter(ctx).Event(progress.RemovedEvent(eventName))
+	return err
+}
+
+func (s *composeService) resolveExternalNetwork(ctx context.Context, n *types.NetworkConfig) (string, error) {
 	// NetworkInspect will match on ID prefix, so NetworkList with a name
 	// filter is used to look for an exact match to prevent e.g. a network
 	// named `db` from getting erroneously matched to a network with an ID
@@ -1339,16 +1391,15 @@ func (s *composeService) resolveExternalNetwork(ctx context.Context, n *types.Ne
 	networks, err := s.apiClient().NetworkList(ctx, network.ListOptions{
 		Filters: filters.NewArgs(filters.Arg("name", n.Name)),
 	})
-
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	if len(networks) == 0 {
 		// in this instance, n.Name is really an ID
 		sn, err := s.apiClient().NetworkInspect(ctx, n.Name, network.InspectOptions{})
 		if err != nil && !errdefs.IsNotFound(err) {
-			return err
+			return "", err
 		}
 		networks = append(networks, sn)
 	}
@@ -1363,40 +1414,40 @@ func (s *composeService) resolveExternalNetwork(ctx context.Context, n *types.Ne
 
 	switch len(networks) {
 	case 1:
-		return nil
+		return networks[0].ID, nil
 	case 0:
 		enabled, err := s.isSWarmEnabled(ctx)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if enabled {
 			// Swarm nodes do not register overlay networks that were
 			// created on a different node unless they're in use.
 			// So we can't preemptively check network exists, but
 			// networkAttach will later fail anyway if network actually doesn't exist
-			return nil
+			return "swarm", nil
 		}
-		return fmt.Errorf("network %s declared as external, but could not be found", n.Name)
+		return "", fmt.Errorf("network %s declared as external, but could not be found", n.Name)
 	default:
-		return fmt.Errorf("multiple networks with name %q were found. Use network ID as `name` to avoid ambiguity", n.Name)
+		return "", fmt.Errorf("multiple networks with name %q were found. Use network ID as `name` to avoid ambiguity", n.Name)
 	}
 }
 
-func (s *composeService) ensureVolume(ctx context.Context, volume types.VolumeConfig, project string) error {
+func (s *composeService) ensureVolume(ctx context.Context, name string, volume types.VolumeConfig, project *types.Project, assumeYes bool) (string, error) {
 	inspected, err := s.apiClient().VolumeInspect(ctx, volume.Name)
 	if err != nil {
 		if !errdefs.IsNotFound(err) {
-			return err
+			return "", err
 		}
 		if volume.External {
-			return fmt.Errorf("external volume %q not found", volume.Name)
+			return "", fmt.Errorf("external volume %q not found", volume.Name)
 		}
-		err := s.createVolume(ctx, volume)
-		return err
+		err = s.createVolume(ctx, volume)
+		return volume.Name, err
 	}
 
 	if volume.External {
-		return nil
+		return volume.Name, nil
 	}
 
 	// Volume exists with name, but let's double-check this is the expected one
@@ -1404,18 +1455,86 @@ func (s *composeService) ensureVolume(ctx context.Context, volume types.VolumeCo
 	if !ok {
 		logrus.Warnf("volume %q already exists but was not created by Docker Compose. Use `external: true` to use an existing volume", volume.Name)
 	}
-	if ok && p != project {
-		logrus.Warnf("volume %q already exists but was created for project %q (expected %q). Use `external: true` to use an existing volume", volume.Name, p, project)
+	if ok && p != project.Name {
+		logrus.Warnf("volume %q already exists but was created for project %q (expected %q). Use `external: true` to use an existing volume", volume.Name, p, project.Name)
 	}
-	return nil
+
+	expected, err := VolumeHash(volume)
+	if err != nil {
+		return "", err
+	}
+	actual, ok := inspected.Labels[api.ConfigHashLabel]
+	if ok && actual != expected {
+		confirm := assumeYes
+		if !assumeYes {
+			msg := fmt.Sprintf("Volume %q exists but doesn't match configuration in compose file. Recreate (data will be lost)?", volume.Name)
+			confirm, err = prompt.NewPrompt(s.stdin(), s.stdout()).Confirm(msg, false)
+			if err != nil {
+				return "", err
+			}
+		}
+		if confirm {
+			err = s.removeDivergedVolume(ctx, name, volume, project)
+			if err != nil {
+				return "", err
+			}
+			return volume.Name, s.createVolume(ctx, volume)
+		}
+	}
+	return inspected.Name, nil
+}
+
+func (s *composeService) removeDivergedVolume(ctx context.Context, name string, volume types.VolumeConfig, project *types.Project) error {
+	// Remove services mounting divergent volume
+	var services []string
+	for _, service := range project.Services.Filter(func(config types.ServiceConfig) bool {
+		for _, cfg := range config.Volumes {
+			if cfg.Source == name {
+				return true
+			}
+		}
+		return false
+	}) {
+		services = append(services, service.Name)
+	}
+
+	err := s.stop(ctx, project.Name, api.StopOptions{
+		Services: services,
+		Project:  project,
+	})
+	if err != nil {
+		return err
+	}
+
+	containers, err := s.getContainers(ctx, project.Name, oneOffExclude, true, services...)
+	if err != nil {
+		return err
+	}
+
+	// FIXME (ndeloof) we have to remove container so we can recreate volume
+	// but doing so we can't inherit anonymous volumes from previous instance
+	err = s.remove(ctx, containers, api.RemoveOptions{
+		Services: services,
+		Project:  project,
+	})
+	if err != nil {
+		return err
+	}
+
+	return s.apiClient().VolumeRemove(ctx, volume.Name, true)
 }
 
 func (s *composeService) createVolume(ctx context.Context, volume types.VolumeConfig) error {
 	eventName := fmt.Sprintf("Volume %q", volume.Name)
 	w := progress.ContextWriter(ctx)
 	w.Event(progress.CreatingEvent(eventName))
-	_, err := s.apiClient().VolumeCreate(ctx, volumetypes.CreateOptions{
-		Labels:     volume.Labels,
+	hash, err := VolumeHash(volume)
+	if err != nil {
+		return err
+	}
+	volume.CustomLabels.Add(api.ConfigHashLabel, hash)
+	_, err = s.apiClient().VolumeCreate(ctx, volumetypes.CreateOptions{
+		Labels:     mergeLabels(volume.Labels, volume.CustomLabels),
 		Name:       volume.Name,
 		Driver:     volume.Driver,
 		DriverOpts: volume.DriverOpts,

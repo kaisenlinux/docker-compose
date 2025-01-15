@@ -167,7 +167,7 @@ func (w *ttyWriter) print() { //nolint:gocyclo
 		_, _ = fmt.Fprint(w.out, aec.Show)
 	}()
 
-	firstLine := fmt.Sprintf("[+] %s %d/%d", w.progressTitle, numDone(w.events), w.numLines)
+	firstLine := fmt.Sprintf("[+] %s %d/%d", w.progressTitle, numDone(w.events), len(w.events))
 	if w.numLines != 0 && numDone(w.events) == w.numLines {
 		firstLine = DoneColor(firstLine)
 	}
@@ -345,6 +345,4 @@ func lenAnsi(s string) int {
 	return length
 }
 
-var (
-	percentChars = strings.Split("⠀⡀⣀⣄⣤⣦⣶⣷⣿", "")
-)
+var percentChars = strings.Split("⠀⡀⣀⣄⣤⣦⣶⣷⣿", "")
